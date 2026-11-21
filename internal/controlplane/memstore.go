@@ -1,18 +1,16 @@
 package controlplane
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/decover-tech/tachyon/internal/prebuild"
+	"github.com/decover-tech/tachyon/internal/secrets"
 )
 
 // In-memory implementations for development and tests. Production needs a
-// database for prebuilds and a managed key store for secrets.
+// database for prebuilds; secrets go to the key store in internal/secrets.
 
 // StaticImages pins every image name to one version.
 type StaticImages map[string]string
@@ -64,40 +62,6 @@ func (m *MemPrebuilds) SetConfig(repo string, c *prebuild.Config) {
 	m.configs[repo] = c
 }
 
-// MemSecrets stores secrets in memory under random references.
-type MemSecrets struct {
-	mu sync.Mutex
-	m  map[string][]byte
-}
-
-func (s *MemSecrets) Put(_ context.Context, path string, value []byte) (string, error) {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	ref := "secret://" + path + "#" + hex.EncodeToString(b[:])
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.m == nil {
-		s.m = map[string][]byte{}
-	}
-	s.m[ref] = append([]byte(nil), value...)
-	return ref, nil
-}
-
-func (s *MemSecrets) Get(_ context.Context, ref string) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.m[ref]
-	if !ok {
-		return nil, fmt.Errorf("secret %s not found", ref)
-	}
-	return v, nil
-}
-
-func (s *MemSecrets) Delete(_ context.Context, ref string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.m, ref)
-	return nil
-}
+// MemSecrets is the in-memory key store, kept under its old name for
+// existing callers. Production uses secrets.Vault.
+type MemSecrets = secrets.Mem

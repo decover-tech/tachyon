@@ -22,6 +22,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/cache/` | Go | Actions cache scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction |
 | `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
 | `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
+| `internal/secrets/` | Go | Key store for JIT configs and tokens (Vault/OpenBao KV v2, or in-memory for dev): `secret://` refs, short TTLs, redaction ([0002-key-store.md](docs/decisions/0002-key-store.md)) |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
 | `examples/node-go/` | – | A repo config and workflow using Tachyon |
 | `gen/` | Go | Generated from `proto/` by `buf generate`; checked in |
@@ -57,10 +58,13 @@ hostd compiles on macOS for tests, but only runs on Linux with KVM, ZFS and Clou
 ### Running the control plane
 
 ```sh
-TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
+TACHYON_GITHUB_WEBHOOK_SECRET=... TACHYON_VAULT_TOKEN=... bin/tachyon-controlplane \
   -github-app-id 123 -github-app-key app.pem \
-  -image ubuntu-24.04=2026-11-16
+  -image ubuntu-24.04=2026-11-16 \
+  -vault-addr https://vault.internal:8200
 ```
+
+JIT runner configs are kept in a Vault or OpenBao KV v2 engine (`-vault-mount secret`, `-vault-prefix tachyon`, `-jit-ttl 10m`); use `-vault-token-file` instead of `TACHYON_VAULT_TOKEN` when a Vault Agent rotates the token. For local development without Vault, pass `-secrets mem`.
 
 Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090`.
 

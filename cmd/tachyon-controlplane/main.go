@@ -23,6 +23,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/scheduler"
+	"github.com/decover-tech/tachyon/internal/secrets"
 )
 
 func main() {
@@ -35,6 +36,14 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	keyStore := secrets.Config{}
+	flag.StringVar(&keyStore.Backend, "secrets", "vault", "key store for JIT configs and tokens: vault or mem (development only)")
+	flag.StringVar(&keyStore.VaultAddr, "vault-addr", os.Getenv("VAULT_ADDR"), "Vault/OpenBao address")
+	flag.StringVar(&keyStore.VaultMount, "vault-mount", "secret", "KV v2 mount")
+	flag.StringVar(&keyStore.VaultPrefix, "vault-prefix", "tachyon", "key prefix under the mount")
+	flag.StringVar(&keyStore.VaultNamespace, "vault-namespace", os.Getenv("VAULT_NAMESPACE"), "Vault namespace (optional)")
+	flag.StringVar(&keyStore.VaultTokenFile, "vault-token-file", "", "file holding the Vault token, re-read per request (default: $TACHYON_VAULT_TOKEN)")
+	flag.DurationVar(&keyStore.JITTTL, "jit-ttl", secrets.DefaultJITTTL, "TTL of stored JIT runner configs")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -54,18 +63,27 @@ func main() {
 		os.Exit(1)
 	}
 
+	keyStore.VaultToken = secrets.Redacted(os.Getenv("TACHYON_VAULT_TOKEN"))
+	store, err := secrets.Open(keyStore)
+	if err != nil {
+		log.Error("key store", "err", err)
+		os.Exit(2)
+	}
+	if keyStore.Backend == "mem" {
+		log.Warn("secrets kept in process memory; use -secrets=vault in production")
+	}
+
 	images := controlplane.StaticImages{}
 	for _, kv := range strings.Split(*image, ",") {
 		if n, v, ok := strings.Cut(kv, "="); ok {
 			images[n] = v
 		}
 	}
-	secrets := &controlplane.MemSecrets{}
 	core := &controlplane.Core{
 		Scheduler: scheduler.New(nil),
 		Images:    images,
 		Prebuilds: &controlplane.MemPrebuilds{},
-		Secrets:   secrets,
+		Secrets:   store,
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
 		Log:       log,
@@ -73,7 +91,7 @@ func main() {
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
 		API:           &github.Client{AppID: *appID, PrivateKey: key},
-		Secrets:       secrets,
+		Secrets:       store,
 		Log:           log,
 	}
 
@@ -104,6 +122,9 @@ func main() {
 			case <-t.C:
 				adapter.Reconcile(ctx)
 				core.RetryDeferred(ctx)
+				if m, ok := store.(*secrets.Mem); ok {
+					m.Sweep()
+				}
 			}
 		}
 	}()
