@@ -77,6 +77,11 @@ Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9
 | `TACHYON_FAILURE_DOMAIN`, `TACHYON_ARCH` | no | `default`, `x86_64` |
 | `TACHYON_CH_BINARY`, `TACHYON_CH_REMOTE` | no | `/usr/local/bin/cloud-hypervisor`, `/usr/local/bin/ch-remote` |
 | `TACHYON_RUN_DIR`, `TACHYON_CGROUP`, `TACHYON_BASE_UID` | no | `/run/tachyon/vms`, `/sys/fs/cgroup/tachyon`, `100000` |
+| `TACHYON_EGRESS_MBIT` | no | `1000` (per-VM egress limit; `0` disables) |
+| `TACHYON_MIRRORS` | no | comma list of mirror URLs, hosts or CIDRs every VM (including prebuild builds) may reach |
+| `TACHYON_DNS` | no | comma list of IPv4 DNS servers guests may query |
+
+Each VM gets its own network namespace and tap (`hostd/src/network.rs`); hostd needs `ip`, `nft` and `tc` on the host, and base snapshots must use a virtio-net device on `tap0` with guest address `172.16.0.2/30`, gateway `172.16.0.1`.
 
 ## Status
 
