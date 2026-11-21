@@ -1,0 +1,32 @@
+[package]
+name = "tachyon-hostd"
+version = "0.1.0"
+edition = "2021"
+description = "Tachyon host agent: runs each CI job in a jailed Cloud Hypervisor microVM"
+license = "UNLICENSED"
+publish = false
+
+[[bin]]
+name = "tachyon-hostd"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+libc = "0.2"
+prost = "0.13"
+prost-types = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+tokio-stream = "0.1"
+tonic = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[build-dependencies]
+protox = "0.7"
+tonic-build = "0.12"
+
+[dev-dependencies]
+tempfile = "3"

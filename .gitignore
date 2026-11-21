@@ -1,0 +1,7 @@
+/bin/
+/hostd/target/
+*.test
+*.out
+.DS_Store
+.env
+*.pem
