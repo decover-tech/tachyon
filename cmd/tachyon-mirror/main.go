@@ -30,7 +30,7 @@ func main() {
 	tlsCert := flag.String("tls-cert", "", "TLS certificate (Docker requires TLS for registry mirrors)")
 	tlsKey := flag.String("tls-key", "", "TLS key")
 	maxGB := flag.Int64("max-cache-gb", 500, "evict least recently used package cache entries above this size")
-	gitRepos := flag.String("git-repos", "", "comma-separated owner/name repos to mirror (repos Tachyon builds); empty disables the git mirror")
+	gitRepos := flag.String("git-repos", "", "comma-separated owner/name repos to mirror (repos Tachyon builds); must be public; empty redirects all git requests upstream")
 	gitUpstream := flag.String("git-upstream", "https://github.com", "git upstream")
 	flag.Parse()
 
@@ -40,14 +40,16 @@ func main() {
 		log.Error("cache dir", "err", err)
 		os.Exit(1)
 	}
-	var git http.Handler
+	// The git handler is always mounted: with no -git-repos it redirects
+	// every request to upstream, so a guest pointed at /git/ by mistake
+	// still fetches instead of getting a 404.
+	git := &gitmirror.Mirror{
+		Dir:      filepath.Join(*dataDir, "git"),
+		Upstream: *gitUpstream,
+		Log:      log,
+	}
 	if *gitRepos != "" {
-		git = &gitmirror.Mirror{
-			Dir:      filepath.Join(*dataDir, "git"),
-			Upstream: *gitUpstream,
-			Allowed:  gitmirror.AllowList(strings.Split(*gitRepos, ",")),
-			Log:      log,
-		}
+		git.Allowed = gitmirror.AllowList(strings.Split(*gitRepos, ","))
 	}
 	// No overall timeout: image layers can take a while. Bound the wait
 	// for upstream to start answering instead.

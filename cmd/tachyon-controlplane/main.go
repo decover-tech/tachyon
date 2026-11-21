@@ -22,6 +22,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
+	"github.com/decover-tech/tachyon/internal/mirrors/gitmirror"
 	"github.com/decover-tech/tachyon/internal/scheduler"
 )
 
@@ -37,6 +38,7 @@ func main() {
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
 	mirrorPrimary := flag.String("mirror-primary", "", "primary tachyon-mirror base URL; with -mirror-secondary, health-checked and overrides the static -mirror-* flags")
 	mirrorSecondary := flag.String("mirror-secondary", "", "secondary tachyon-mirror base URL")
+	gitRepos := flag.String("mirror-git-repos", "", "comma-separated public owner/name repos the mirrors' -git-repos serve; only jobs for these repos fetch git through the mirror (never list private repos)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -89,6 +91,9 @@ func main() {
 			Log:    log,
 		}
 		core.MirrorPair = mon
+		if *gitRepos != "" {
+			core.GitMirrored = gitmirror.AllowList(strings.Split(*gitRepos, ","))
+		}
 		go mon.Run(ctx, 5*time.Second)
 	}
 

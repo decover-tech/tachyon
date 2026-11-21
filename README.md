@@ -76,7 +76,7 @@ bin/tachyon-mirror -listen :443 -data /var/cache/tachyon-mirror \
   -git-repos acme/api,acme/web
 ```
 
-and point the control plane at both with `-mirror-primary https://mirror-a.r1.tachyon.internal -mirror-secondary https://mirror-b.r1.tachyon.internal`. It probes `/healthz` on each every 5 seconds; new jobs use the primary while it is up, then the secondary, and get no mirror config at all (straight to upstream) if both are down. Docker requires TLS for registry mirrors.
+and point the control plane at both with `-mirror-primary https://mirror-a.r1.tachyon.internal -mirror-secondary https://mirror-b.r1.tachyon.internal -mirror-git-repos acme/api,acme/web`. `-git-repos` and `-mirror-git-repos` must list the same repos, and only public ones: jobs for any other repo, including every private repo, get no git rewrite and fetch from GitHub directly with actions/checkout's token. It probes `/healthz` on each every 5 seconds; new jobs use the primary while it is up, then the secondary, and get no mirror config at all (straight to upstream) if both are down. Docker requires TLS for registry mirrors.
 
 Only public content is mirrored: the mirror fetches upstream anonymously, requests that carry credentials pass straight through uncached, private images get a 404 so the client falls back to the registry, the apt proxy only serves public Ubuntu/Debian archives, and the git mirror redirects any repo it can't clone anonymously to GitHub.
 

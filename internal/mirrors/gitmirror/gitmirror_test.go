@@ -153,3 +153,22 @@ func TestNoAllowListMirrorsNothing(t *testing.T) {
 		t.Errorf("code = %d", rec.Code)
 	}
 }
+
+// With no allowlist (tachyon-mirror without -git-repos) every request is
+// redirected upstream rather than answered with a 404.
+func TestMirrorWithoutAllowListRedirectsEverything(t *testing.T) {
+	m := &Mirror{Dir: t.TempDir(), Upstream: "https://github.com"}
+	for _, tc := range []struct{ method, target string }{
+		{http.MethodGet, "/acme/api/info/refs?service=git-upload-pack"},
+		{http.MethodPost, "/acme/api/git-upload-pack"},
+	} {
+		rec := httptest.NewRecorder()
+		m.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.target, nil))
+		if rec.Code != http.StatusTemporaryRedirect {
+			t.Fatalf("%s %s = %d, want 307", tc.method, tc.target, rec.Code)
+		}
+		if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "https://github.com/acme/api.git/") {
+			t.Errorf("Location = %q", loc)
+		}
+	}
+}

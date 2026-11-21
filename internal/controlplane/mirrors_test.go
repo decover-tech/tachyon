@@ -16,6 +16,7 @@ func TestGuestUsesHealthyMirrorThenUpstream(t *testing.T) {
 	pair := &fixedPair{base: "https://mirror-b.r1"}
 	e.core.Mirrors = mirrors.Endpoints{NPM: "https://static.example/"} // overridden by the pair
 	e.core.MirrorPair = pair
+	e.core.GitMirrored = func(repo string) bool { return repo == "acme/api" }
 	s := e.connect(t, "h1", "us", 16, 64)
 	s.push(t, heartbeat(false))
 
@@ -50,5 +51,33 @@ func TestGuestUsesHealthyMirrorThenUpstream(t *testing.T) {
 	}
 	if len(g.GetFiles()) != 0 {
 		t.Errorf("both mirrors down but files %v", g.GetFiles())
+	}
+}
+
+// Only repos listed as mirrored get the git rewrite. Others (a private repo,
+// or a mirror with git disabled) fetch straight from GitHub, where
+// actions/checkout's token header applies.
+func TestGitRewriteOnlyForMirroredRepos(t *testing.T) {
+	for name, mirrored := range map[string]func(string) bool{
+		"unset":    nil,
+		"unlisted": func(repo string) bool { return repo == "acme/other" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv()
+			e.core.MirrorPair = &fixedPair{base: "https://mirror-a.r1"}
+			e.core.GitMirrored = mirrored
+			s := e.connect(t, "h1", "us", 16, 64)
+			s.push(t, heartbeat(false))
+			if err := e.core.Submit(context.Background(), e.submission(t, "j1", 2)); err != nil {
+				t.Fatal(err)
+			}
+			g := s.next(t).GetAssign().GetGuest()
+			if b, ok := g.GetFiles()["/etc/gitconfig.d/tachyon"]; ok {
+				t.Errorf("git routed through mirror for unmirrored repo:\n%s", b)
+			}
+			if _, ok := g.GetEnv()["npm_config_registry"]; !ok {
+				t.Error("package mirrors should still apply")
+			}
+		})
 	}
 }

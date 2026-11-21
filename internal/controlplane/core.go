@@ -59,6 +59,13 @@ type Core struct {
 	// MirrorPair, if set, overrides Mirrors with the region's
 	// health-checked mirror pair (zero Endpoints = upstream).
 	MirrorPair interface{ Endpoints() mirrors.Endpoints }
+	// GitMirrored reports whether a repo (owner/name) is public and served
+	// by the region's git mirror. Only those repos get the git insteadOf
+	// rewrite: a private repo routed through the mirror would be
+	// redirected to GitHub without the checkout token (git scopes
+	// http.https://github.com/.extraheader to the rewritten mirror URL),
+	// and a repo the mirror doesn't serve gains nothing. nil means none.
+	GitMirrored func(repo string) bool
 
 	mu       sync.Mutex
 	hosts    map[string]*hostConn
@@ -255,6 +262,9 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 	}
 	if s := mir.MavenSettings(); s != "" {
 		files["~/.m2/settings.xml"] = []byte(s)
+	}
+	if c.GitMirrored == nil || !c.GitMirrored(repo) {
+		mir.Git = ""
 	}
 	if s := mir.GitConfig([]string{repo}); s != "" {
 		files["/etc/gitconfig.d/tachyon"] = []byte(s)
