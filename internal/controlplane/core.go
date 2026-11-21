@@ -13,6 +13,7 @@ import (
 	"time"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/abuse"
 	"github.com/decover-tech/tachyon/internal/jobapi"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/prebuild"
@@ -55,6 +56,12 @@ type Core struct {
 	CacheURL  string
 	Log       *slog.Logger
 	Now       func() time.Time
+	// Limits, when set, refuses jobs over free/trial plan limits or from
+	// unverified or suspended tenants.
+	Limits *abuse.Gate
+	// Anomalies, when set, watches running jobs for mining and attack
+	// patterns; alerts that call for it cancel the job.
+	Anomalies *abuse.Monitor
 
 	mu       sync.Mutex
 	hosts    map[string]*hostConn
@@ -125,7 +132,7 @@ func (c *Core) Hint(ctx context.Context, h jobapi.Hint) error {
 }
 
 // Submit plans, places and dispatches a job.
-func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
+func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 	spec := &sub.Spec
 	pinned, err := c.Images.Pin(spec.Image)
 	if err != nil {
@@ -134,6 +141,16 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	spec.Image = pinned
 	if err := spec.Validate(); err != nil {
 		return err
+	}
+	if c.Limits != nil {
+		if err := c.Limits.Admit(ctx, sub); err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				c.Limits.Release(spec.JobID)
+			}
+		}()
 	}
 
 	rec := telemetry.NewRecord(spec.JobID)
@@ -160,6 +177,9 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		if c.Burst == nil {
 			return err
 		}
+		// Burst results do not come back over hostlink, so the job does
+		// not hold a plan slot. TODO: count burst jobs too.
+		defer c.releaseLimits(spec.JobID)
 		return c.Burst.Submit(ctx, sub)
 	case err != nil:
 		return err
@@ -181,6 +201,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		c.Scheduler.Release(spec.JobID, nil)
 		return fmt.Errorf("host %s not connected", a.HostID)
 	}
+	c.trackAbuse(ctx, spec, a.HostID)
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
 	return nil
 }

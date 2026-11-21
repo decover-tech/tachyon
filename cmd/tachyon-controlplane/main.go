@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/abuse"
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
@@ -35,6 +36,7 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	unknownPlan := flag.String("unknown-tenant-plan", "paid", "plan assumed for tenants with no account record (free, trial, paid; empty refuses them)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -61,6 +63,8 @@ func main() {
 		}
 	}
 	secrets := &controlplane.MemSecrets{}
+	// No account store yet: every tenant gets -unknown-tenant-plan.
+	gate := &abuse.Gate{Accounts: &abuse.MemAccounts{}, UnknownPlan: abuse.Plan(*unknownPlan)}
 	core := &controlplane.Core{
 		Scheduler: scheduler.New(nil),
 		Images:    images,
@@ -69,6 +73,8 @@ func main() {
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
 		Log:       log,
+		Limits:    gate,
+		Anomalies: &abuse.Monitor{Alerter: abuse.LogAlerter{Log: log}, Suspender: gate, Log: log},
 	}
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
