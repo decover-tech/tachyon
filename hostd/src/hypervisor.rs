@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::jailer::{slot_ids, JailSpec};
+use crate::rootfs::{self, GuestRoot};
 
 /// What the guest agent receives over vsock before the runner starts.
 /// Debug and Display both omit the runner config.
@@ -33,6 +34,9 @@ pub struct GuestPayload {
     /// Set for prebuild builds: run these, keep paths, scrub credentials,
     /// then shut down without starting a runner.
     pub prebuild: Option<GuestPrebuild>,
+    /// Overlay root: base image (virtio-pmem, DAX) under the job disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<GuestRoot>,
 }
 
 impl std::fmt::Display for GuestPayload {
@@ -162,6 +166,9 @@ impl Hypervisor for CloudHypervisor {
     type Vm = ChVm;
 
     fn restore_paused(&self, vcpu: u32, memory_gb: u32) -> Result<ChVm> {
+        let snapshot = self.base_snapshots.join(vcpu.to_string());
+        // The base image must be shared read-only through virtio-pmem.
+        rootfs::check_snapshot(&snapshot).context("base snapshot")?;
         let slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
         let id = format!("vm{slot}");
         let dir = self.run_dir.join(&id);
@@ -179,7 +186,6 @@ impl Hypervisor for CloudHypervisor {
             bind: Some((dir.clone(), PathBuf::from(IN_JAIL_DIR))),
         };
         jail.create_cgroup()?;
-        let snapshot = self.base_snapshots.join(vcpu.to_string());
         let mut cmd = Command::new(&self.binary);
         cmd.arg("--api-socket")
             .arg(format!("path={IN_JAIL_DIR}/api.sock"))

@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use crate::hypervisor::{GuestDisk, GuestPayload, GuestPrebuild, Hypervisor};
 use crate::pb;
+use crate::rootfs;
 use crate::storage::{self, Storage};
 
 /// Max job wall time, matching GitHub-hosted runners.
@@ -116,6 +117,10 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             anyhow::bail!("prebuilds may only be built from trusted refs");
         }
 
+        // Sticky volumes to attach; /var/lib/docker is always among them,
+        // never on the overlay.
+        let volumes = rootfs::plan_volumes(&job.volumes)?;
+
         // Job disk: copy-on-write fork of the prebuild, or an empty disk.
         let job_disk = storage::job_disk(&job.job_id);
         if job.prebuild_snapshot_id.is_empty() {
@@ -130,7 +135,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         // Sticky volumes: clone-then-promote, so two jobs never write the
         // same volume and an untrusted job can never poison it.
         let mut sticky = Vec::new();
-        for v in &job.volumes {
+        for v in &volumes {
             let clone = storage::sticky_clone(&job.job_id, &v.key);
             if v.source_snapshot_id.is_empty() {
                 self.storage.create_empty(&clone, EMPTY_DISK_GB)?;
@@ -149,12 +154,16 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
 
             let mut payload = GuestPayload {
                 job_id: job.job_id.clone(),
+                root: Some(rootfs::guest_root(&job.base_image)),
                 ..Default::default()
             };
-            self.hv
-                .attach_disk(&mut vm, "job", &self.storage.device_path(&job_disk))?;
+            self.hv.attach_disk(
+                &mut vm,
+                rootfs::UPPER_SERIAL,
+                &self.storage.device_path(&job_disk),
+            )?;
             payload.disks.push(GuestDisk {
-                serial: "job".into(),
+                serial: rootfs::UPPER_SERIAL.into(),
                 mount: "/".into(),
             });
             for (v, clone) in &sticky {
@@ -415,6 +424,68 @@ mod tests {
         let r = a.run_job(&j, &|_| {});
         assert_eq!(r.outcome(), Outcome::InfraError);
         assert_eq!(a.hv.restored.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn payload_describes_dax_overlay_root() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        let r = a.run_job(&job(pb::Trust::Untrusted), &|_| {});
+        assert_eq!(r.outcome(), Outcome::Succeeded, "{}", r.error);
+        let p = &a.hv.payloads.lock().unwrap()[0];
+        let root = p.root.as_ref().expect("root");
+        assert_eq!(root.base_image, "ubuntu-24.04@2026-11-16");
+        assert_eq!(root.lower_device, "/dev/pmem0");
+        assert!(root.lower_options.iter().any(|o| o == "dax"));
+        assert!(root.lower_options.iter().any(|o| o == "ro"));
+        // The upper layer is the job disk, attached under the same serial.
+        assert_eq!(root.upper_serial, "job");
+        assert!(p.disks.iter().any(|d| d.serial == "job" && d.mount == "/"));
+    }
+
+    #[test]
+    fn docker_volume_added_when_missing() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        let mut j = job(pb::Trust::Trusted);
+        j.volumes.clear();
+        let r = a.run_job(&j, &|_| {});
+        assert_eq!(r.outcome(), Outcome::Succeeded, "{}", r.error);
+        assert!(a
+            .storage
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l == "create jobs/gh_1-docker"));
+        let p = &a.hv.payloads.lock().unwrap()[0];
+        assert!(p
+            .disks
+            .iter()
+            .any(|d| d.serial == "sticky-docker" && d.mount == "/var/lib/docker"));
+        // Trusted and successful: the new docker volume is promoted.
+        assert_eq!(r.promoted.len(), 1);
+        assert_eq!(r.promoted[0].key, "docker");
+    }
+
+    #[test]
+    fn volume_over_root_refused_before_any_disk() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        let mut j = job(pb::Trust::Trusted);
+        j.volumes.push(pb::Volume {
+            key: "evil".into(),
+            mount: "/".into(),
+            source_snapshot_id: String::new(),
+        });
+        let r = a.run_job(&j, &|_| {});
+        assert_eq!(r.outcome(), Outcome::InfraError);
+        assert!(r.error.contains("overlay root"), "{}", r.error);
+        assert_eq!(a.hv.restored.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(a
+            .storage
+            .log
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|l| !l.starts_with("clone") && !l.starts_with("create")));
     }
 
     #[test]
