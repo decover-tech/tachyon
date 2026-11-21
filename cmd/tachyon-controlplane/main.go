@@ -22,6 +22,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
+	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/scheduler"
 )
 
@@ -35,6 +36,7 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	nightlyHour := flag.Int("nightly-hour", 3, "UTC hour after which each repo's nightly clean run starts; -1 disables it (it needs the App's actions:write and checks:write permissions)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -70,11 +72,24 @@ func main() {
 		CacheURL:  *cacheURL,
 		Log:       log,
 	}
+	client := &github.Client{AppID: *appID, PrivateKey: key}
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
-		API:           &github.Client{AppID: *appID, PrivateKey: key},
+		API:           client,
 		Secrets:       secrets,
 		Log:           log,
+	}
+	if *nightlyHour >= 0 && *nightlyHour < 24 {
+		adapter.Nightly = &github.Nightly{
+			API:  client,
+			Hour: *nightlyHour,
+			PrebuildMatch: func(jobID string) prebuild.Match {
+				if rec := core.Record(jobID); rec != nil {
+					return prebuild.Match(rec.PrebuildMatch)
+				}
+				return ""
+			},
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
