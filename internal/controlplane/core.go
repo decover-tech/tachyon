@@ -55,6 +55,9 @@ type Core struct {
 	CacheURL  string
 	Log       *slog.Logger
 	Now       func() time.Time
+	// Results, if set, receives every job result (e.g. the GitHub adapter,
+	// for opt-in re-runs of infrastructure failures).
+	Results jobapi.ResultHandler
 
 	mu       sync.Mutex
 	hosts    map[string]*hostConn

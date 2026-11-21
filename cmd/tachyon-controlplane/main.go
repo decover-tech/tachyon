@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -35,6 +36,7 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	rerunInfra := flag.String("github-rerun-infra", "", "comma-separated GitHub App installation IDs opted in to re-running jobs that failed for infrastructure reasons (needs Actions write)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -76,6 +78,19 @@ func main() {
 		Secrets:       secrets,
 		Log:           log,
 	}
+	if *rerunInfra != "" {
+		optedIn := map[int64]bool{}
+		for _, s := range strings.Split(*rerunInfra, ",") {
+			id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+			if err != nil {
+				log.Error("bad -github-rerun-infra installation ID", "value", s)
+				os.Exit(2)
+			}
+			optedIn[id] = true
+		}
+		adapter.RerunInfra = func(inst int64, _ string) bool { return optedIn[inst] }
+	}
+	core.Results = adapter
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

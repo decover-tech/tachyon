@@ -34,17 +34,39 @@ type Adapter struct {
 	// MaxAttempts bounds retries of one job.
 	MaxAttempts int
 
+	// Budget limits GitHub API calls per installation; nil uses a Budget
+	// with default limits.
+	Budget *Budget
+
+	// RerunInfra opts an installation's repo in to re-running jobs whose
+	// result was jobapi.OutcomeInfra. Nil (the default) never re-runs. It
+	// is called without the adapter's lock held.
+	RerunInfra func(installationID int64, repo string) bool
+	// MaxInfraReruns bounds automatic re-runs: a job is re-run only while
+	// its workflow run attempt is at most this. Default 1.
+	MaxInfraReruns int
+	// RerunWindow is how long to keep retrying a re-run request (GitHub
+	// accepts it only once the workflow run completes). Default 1h.
+	RerunWindow time.Duration
+
 	mu      sync.Mutex
 	core    jobapi.Core
 	pending map[int64]*pendingJob // GitHub job ID -> job waiting for a runner
 	active  map[string]bool       // runner names of jobs in progress
 	repos   map[string]int64      // repos seen -> installation, for orphan sweeps
+	jobs    map[string]*jobRef    // spec job ID -> GitHub job, until its result arrives
+	reruns  map[string]*rerunReq  // spec job ID -> infra re-run to request
 }
 
 type pendingJob struct {
 	installationID int64
 	repo           string
 	labels         []string
+	event          workflowJobEvent
+	runsOn         RunsOn
+	prepared       bool // sub is built
+	dispatched     bool // a runner exists and sub was submitted
+	busy           bool // a webhook or reconcile pass is working on it
 	sub            jobapi.Submission
 	runnerID       int64
 	runnerName     string
@@ -53,7 +75,10 @@ type pendingJob struct {
 	attempts       int
 }
 
-var _ jobapi.Frontend = (*Adapter)(nil)
+var (
+	_ jobapi.Frontend      = (*Adapter)(nil)
+	_ jobapi.ResultHandler = (*Adapter)(nil)
+)
 
 func (a *Adapter) Name() string { return "github" }
 
@@ -75,14 +100,44 @@ func (a *Adapter) log() *slog.Logger {
 func (a *Adapter) Handler(core jobapi.Core) http.Handler {
 	a.mu.Lock()
 	a.core = core
+	a.initLocked()
+	a.mu.Unlock()
+	return http.HandlerFunc(a.serveWebhook)
+}
+
+// initLocked allocates the adapter's state. a.mu must be held.
+func (a *Adapter) initLocked() {
 	if a.pending == nil {
 		a.pending = map[int64]*pendingJob{}
 		a.active = map[string]bool{}
 		a.repos = map[string]int64{}
+		a.jobs = map[string]*jobRef{}
+		a.reruns = map[string]*rerunReq{}
 	}
-	a.mu.Unlock()
-	return http.HandlerFunc(a.serveWebhook)
+	if a.Budget == nil {
+		a.Budget = &Budget{}
+	}
 }
+
+func (a *Adapter) budget() *Budget {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.initLocked()
+	return a.Budget
+}
+
+// call makes one GitHub API call for inst within its budget.
+func (a *Adapter) call(inst int64, fn func() error) error {
+	b := a.budget()
+	if err := b.Take(inst, a.now()); err != nil {
+		return err
+	}
+	err := fn()
+	b.Observe(inst, a.now(), err)
+	return err
+}
+
+func specJobID(githubJobID int64) string { return fmt.Sprintf("gh_%d", githubJobID) }
 
 func (a *Adapter) serveWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -141,6 +196,7 @@ type workflowJobEvent struct {
 	WorkflowJob struct {
 		ID           int64    `json:"id"`
 		RunID        int64    `json:"run_id"`
+		RunAttempt   int      `json:"run_attempt"`
 		WorkflowName string   `json:"workflow_name"`
 		Name         string   `json:"name"`
 		HeadSHA      string   `json:"head_sha"`
@@ -220,8 +276,12 @@ func (a *Adapter) onWorkflowJob(ctx context.Context, e workflowJobEvent) error {
 		a.mu.Lock()
 		if p, ok := a.pending[j.ID]; ok { // cancelled before it started
 			delete(a.pending, j.ID)
+			delete(a.jobs, specJobID(j.ID))
+			busy := p.busy // if so, whoever holds it cleans up
 			a.mu.Unlock()
-			a.cleanupRunner(ctx, p)
+			if !busy {
+				a.cleanupRunner(ctx, p)
+			}
 			return nil
 		}
 		delete(a.active, j.RunnerName)
@@ -232,6 +292,12 @@ func (a *Adapter) onWorkflowJob(ctx context.Context, e workflowJobEvent) error {
 
 func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 	j := e.WorkflowJob
+	runsOn, err := ParseLabels(j.Labels)
+	if err != nil {
+		// A bad label is the customer's config error; retrying won't help.
+		a.log().Warn("ignoring job with invalid Tachyon labels", "repo", e.Repository.FullName, "job", j.ID, "err", err)
+		return nil
+	}
 	// Reserve the job ID before any API call, so concurrent redeliveries of
 	// the same webhook can't both create a runner.
 	a.mu.Lock()
@@ -239,28 +305,81 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 		a.mu.Unlock()
 		return nil
 	}
-	p := &pendingJob{installationID: e.Installation.ID, repo: e.Repository.FullName, labels: j.Labels}
+	p := &pendingJob{
+		installationID: e.Installation.ID,
+		repo:           e.Repository.FullName,
+		labels:         j.Labels,
+		event:          e,
+		runsOn:         runsOn,
+		busy:           true,
+	}
+	p.sub.QueuedAt = a.now()
 	a.pending[j.ID] = p
 	a.repos[p.repo] = p.installationID
+	a.jobs[specJobID(j.ID)] = &jobRef{
+		installationID: p.installationID,
+		repo:           p.repo,
+		githubJobID:    j.ID,
+		runAttempt:     j.RunAttempt,
+		seen:           a.now(),
+	}
 	a.mu.Unlock()
-	ok := false
-	defer func() {
-		if !ok {
-			a.mu.Lock()
-			if a.pending[j.ID] == p {
-				delete(a.pending, j.ID)
-			}
-			a.mu.Unlock()
-		}
-	}()
 
-	runsOn, err := ParseLabels(j.Labels)
-	if err != nil {
-		// A bad label is the customer's config error; retrying won't help.
-		a.log().Warn("ignoring job with invalid Tachyon labels", "repo", e.Repository.FullName, "job", j.ID, "err", err)
+	err = a.prepare(ctx, p)
+	if err == nil {
+		err = a.dispatch(ctx, p)
+	}
+	switch {
+	case err == nil:
+	case IsThrottled(err):
+		// The job stays pending; Reconcile dispatches it once the
+		// installation's budget recovers.
+		a.log().Warn("GitHub API throttled; job left for reconcile", "repo", p.repo, "job", j.ID, "err", err)
+		err = nil
+	default:
+		a.mu.Lock()
+		if a.pending[j.ID] == p {
+			delete(a.pending, j.ID)
+			delete(a.jobs, specJobID(j.ID))
+		}
+		a.mu.Unlock()
+		return err
+	}
+	a.release(ctx, j.ID, p)
+	return nil
+}
+
+// release ends a webhook's or reconcile pass's work on p. If the job left
+// pending meanwhile (it started or was cancelled), the runner p may have
+// just created is no longer wanted.
+func (a *Adapter) release(ctx context.Context, id int64, p *pendingJob) {
+	a.mu.Lock()
+	p.busy = false
+	gone := a.pending[id] != p
+	a.mu.Unlock()
+	if gone && p.dispatched && !a.isActive(p.runnerName) {
+		a.cleanupRunner(ctx, p)
+	}
+}
+
+func (a *Adapter) isActive(runner string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.active[runner]
+}
+
+// prepare looks up the job's run and builds its submission.
+func (a *Adapter) prepare(ctx context.Context, p *pendingJob) error {
+	if p.prepared {
 		return nil
 	}
-	rc, err := a.API.RunContext(ctx, e.Installation.ID, e.Repository.FullName, j.RunID)
+	e, runsOn := p.event, p.runsOn
+	j := e.WorkflowJob
+	var rc RunContext
+	err := a.call(p.installationID, func() (err error) {
+		rc, err = a.API.RunContext(ctx, e.Installation.ID, e.Repository.FullName, j.RunID)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("run context: %w", err)
 	}
@@ -277,7 +396,7 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 	}
 	sub := jobapi.Submission{
 		Spec: jobapi.Spec{
-			JobID:    fmt.Sprintf("gh_%d", j.ID),
+			JobID:    specJobID(j.ID),
 			Tenant:   fmt.Sprintf("gh_inst_%d", e.Installation.ID),
 			Repo:     "github.com/" + e.Repository.FullName,
 			Commit:   j.HeadSHA,
@@ -289,27 +408,35 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 		},
 		Profile:    fmt.Sprintf("%s/%s/%s", e.Repository.FullName, j.WorkflowName, j.Name),
 		Deferrable: runsOn.Deferrable,
-		QueuedAt:   a.now(),
+		QueuedAt:   p.sub.QueuedAt,
 	}
 	p.sub = sub
-	if err := a.dispatch(ctx, p); err != nil {
-		return err
-	}
-	ok = true
+	p.prepared = true
 	return nil
 }
 
-// dispatch mints a fresh JIT runner for p and submits it to the core.
+// dispatch mints a fresh JIT runner for p and submits it to the core. A
+// throttled attempt does not count towards MaxAttempts.
 func (a *Adapter) dispatch(ctx context.Context, p *pendingJob) error {
-	p.attempts++
-	p.runnerName = fmt.Sprintf("tachyon-%s-%d", p.sub.Spec.JobID, p.attempts)
-	jit, err := a.API.CreateJITConfig(ctx, p.installationID, p.repo, p.runnerName, p.labels)
+	attempt := p.attempts + 1
+	name := fmt.Sprintf("tachyon-%s-%d", p.sub.Spec.JobID, attempt)
+	var jit JITRunner
+	err := a.call(p.installationID, func() (err error) {
+		jit, err = a.API.CreateJITConfig(ctx, p.installationID, p.repo, name, p.labels)
+		return err
+	})
 	if err != nil {
+		if !IsThrottled(err) {
+			p.attempts = attempt
+		}
 		return fmt.Errorf("create JIT runner: %w", err)
 	}
+	p.attempts, p.runnerName = attempt, name
 	ref, err := a.Secrets.Put(ctx, "jit/"+p.runnerName, jit.JITConfig)
 	if err != nil {
-		_ = a.API.DeleteRunner(ctx, p.installationID, p.repo, jit.RunnerID)
+		_ = a.call(p.installationID, func() error {
+			return a.API.DeleteRunner(ctx, p.installationID, p.repo, jit.RunnerID)
+		})
 		return fmt.Errorf("store JIT config: %w", err)
 	}
 	p.runnerID, p.secretRef = jit.RunnerID, ref
@@ -322,16 +449,25 @@ func (a *Adapter) dispatch(ctx context.Context, p *pendingJob) error {
 		a.cleanupRunner(ctx, p)
 		return fmt.Errorf("submit: %w", err)
 	}
+	p.dispatched = true
 	return nil
 }
 
+// cleanupRunner removes p's runner registration and JIT secret. If the
+// budget prevents the delete, the orphan sweep removes the runner later.
 func (a *Adapter) cleanupRunner(ctx context.Context, p *pendingJob) {
-	if err := a.API.DeleteRunner(ctx, p.installationID, p.repo, p.runnerID); err != nil {
-		a.log().Warn("delete runner", "runner", p.runnerName, "err", err)
+	if p.runnerID != 0 {
+		err := a.call(p.installationID, func() error {
+			return a.API.DeleteRunner(ctx, p.installationID, p.repo, p.runnerID)
+		})
+		if err != nil {
+			a.log().Warn("delete runner", "runner", p.runnerName, "err", err)
+		}
 	}
 	if p.secretRef != "" {
 		_ = a.Secrets.Delete(ctx, p.secretRef)
 	}
+	p.runnerID, p.secretRef, p.dispatched = 0, "", false
 }
 
 func (a *Adapter) onPush(ctx context.Context, e pushEvent) error {
@@ -389,8 +525,11 @@ func (a *Adapter) hint(ctx context.Context, h jobapi.Hint) error {
 	return core.Hint(ctx, h)
 }
 
-// Reconcile retries jobs still queued after ReconcileAfter and removes
-// orphaned Tachyon runner registrations. Run it periodically.
+// Reconcile retries jobs still queued after ReconcileAfter, dispatches jobs
+// that were left pending while their installation was throttled, requests
+// opted-in re-runs of infrastructure failures, and removes orphaned Tachyon
+// runner registrations. Installations whose budget is spent or backing off
+// are skipped until they recover. Run it periodically.
 func (a *Adapter) Reconcile(ctx context.Context) {
 	timeout := a.ReconcileAfter
 	if timeout == 0 {
@@ -400,11 +539,16 @@ func (a *Adapter) Reconcile(ctx context.Context) {
 	if maxAttempts == 0 {
 		maxAttempts = 3
 	}
+	b := a.budget()
 	now := a.now()
 
+	type work struct {
+		id int64
+		p  *pendingJob
+	}
 	a.mu.Lock()
-	var stale []*pendingJob
-	var staleIDs []int64
+	a.initLocked()
+	var stale []work
 	repos := map[string]int64{}
 	for r, inst := range a.repos {
 		repos[r] = inst
@@ -412,42 +556,77 @@ func (a *Adapter) Reconcile(ctx context.Context) {
 	known := map[string]bool{}
 	for id, p := range a.pending {
 		known[p.runnerName] = true
-		if now.Sub(p.submittedAt) >= timeout {
-			stale = append(stale, p)
-			staleIDs = append(staleIDs, id)
+		if p.busy || (p.dispatched && now.Sub(p.submittedAt) < timeout) {
+			continue
 		}
+		if !b.Ready(p.installationID, now) {
+			continue // reconciled once the installation recovers
+		}
+		p.busy = true
+		stale = append(stale, work{id, p})
 	}
 	for name := range a.active {
 		known[name] = true
 	}
+	for id, j := range a.jobs {
+		if now.Sub(j.seen) > jobRefTTL {
+			delete(a.jobs, id)
+		}
+	}
 	a.mu.Unlock()
 
-	for i, p := range stale {
-		a.cleanupRunner(ctx, p)
-		delete(known, p.runnerName)
+	for _, w := range stale {
+		p := w.p
+		if p.dispatched {
+			a.cleanupRunner(ctx, p)
+			delete(known, p.runnerName)
+		}
 		if p.attempts >= maxAttempts {
-			a.log().Error("job not picked up, giving up", "job", p.sub.Spec.JobID, "attempts", p.attempts)
+			a.log().Error("job not picked up, giving up", "job", specJobID(w.id), "attempts", p.attempts)
 			a.mu.Lock()
-			delete(a.pending, staleIDs[i])
+			if a.pending[w.id] == p {
+				delete(a.pending, w.id)
+				delete(a.jobs, specJobID(w.id))
+			}
 			a.mu.Unlock()
 			continue
 		}
-		if err := a.dispatch(ctx, p); err != nil {
-			a.log().Warn("re-dispatch failed", "job", p.sub.Spec.JobID, "err", err)
+		err := a.prepare(ctx, p)
+		if err == nil {
+			err = a.dispatch(ctx, p)
 		}
-		known[p.runnerName] = true
+		if err != nil {
+			a.log().Warn("re-dispatch failed", "job", specJobID(w.id), "throttled", IsThrottled(err), "err", err)
+		}
+		if p.dispatched {
+			known[p.runnerName] = true
+		}
+		a.release(ctx, w.id, p)
 	}
 
+	a.requestReruns(ctx)
+
 	for repo, inst := range repos {
-		runners, err := a.API.ListRunners(ctx, inst, repo)
+		if !b.Ready(inst, a.now()) {
+			continue
+		}
+		var runners []Runner
+		err := a.call(inst, func() (err error) {
+			runners, err = a.API.ListRunners(ctx, inst, repo)
+			return err
+		})
 		if err != nil {
 			a.log().Warn("list runners", "repo", repo, "err", err)
 			continue
 		}
 		for _, r := range runners {
 			if strings.HasPrefix(r.Name, LabelPrefix) && !known[r.Name] && !r.Busy {
-				if err := a.API.DeleteRunner(ctx, inst, repo, r.ID); err != nil {
+				err := a.call(inst, func() error { return a.API.DeleteRunner(ctx, inst, repo, r.ID) })
+				if err != nil {
 					a.log().Warn("delete orphan runner", "runner", r.Name, "err", err)
+					if IsThrottled(err) {
+						break
+					}
 				}
 			}
 		}
