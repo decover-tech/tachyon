@@ -1,0 +1,9 @@
+# .tachyon/prebuild.yml
+version: 1
+key_files: [package-lock.json, go.sum, .tool-versions]
+paths: [~/.npm, ~/go/pkg/mod, ~/.cache/go-build, node_modules]
+warm:
+  - run: npm ci
+  - run: go mod download
+  - run: docker pull postgres:16
+memory_snapshot: false

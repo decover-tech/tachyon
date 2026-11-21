@@ -256,7 +256,7 @@ The biggest risk is that prebuilds save less than expected on real workloads, so
 
 **Decisions needed:**
 
-- [ ] D1: Language for hostd and the control plane (Go or Rust)
+- [x] D1: Language for hostd and the control plane — **decided:** Rust for `tachyon-hostd`, Go for everything above it, protobuf at the boundary ([0001-language.md](decisions/0001-language.md))
 - [ ] D2: Copy-on-write engine (ZFS volumes or LVM thin), from Phase 0 benchmarks
 - [ ] D3: First region and server provider
 - [ ] D4: Object store behind the cache service

@@ -1,0 +1,12 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: tachyon-ubuntu-24.04-8x # the only change from ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: decover-tech/tachyon/actions/warm@main # restores node_modules from the prebuild
+      - run: npm ci
+        if: env.TACHYON_WARM != 'hit'
+      - run: npm test
+      - run: go test ./...

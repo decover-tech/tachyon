@@ -1,0 +1,192 @@
+// The contract between tachyon-hostd (Rust, one per host) and the control
+// plane (Go). This file is the only thing the two languages share.
+//
+// hostd dials the control plane and keeps one bidirectional stream open, so
+// hosts on rented servers need no inbound ports. If the stream drops, running
+// jobs keep running and hostd reconnects; the control plane treats a host as
+// gone only after missed heartbeats.
+syntax = "proto3";
+
+package tachyon.hostlink.v1;
+
+option go_package = "github.com/decover-tech/tachyon/gen/hostlink/v1;hostlinkv1";
+
+import "google/protobuf/timestamp.proto";
+
+service HostLinkService {
+  rpc Link(stream LinkRequest) returns (stream LinkResponse);
+}
+
+// ---- hostd -> control plane ----
+
+message LinkRequest {
+  oneof msg {
+    Hello hello = 1;
+    Heartbeat heartbeat = 2;
+    JobEvent job_event = 3;
+    JobResult job_result = 4;
+  }
+}
+
+// First message on every stream.
+message Hello {
+  string host_id = 1;
+  string region = 2;
+  string failure_domain = 3;
+  string arch = 4; // x86_64 | arm64
+  uint32 vcpu = 5;
+  uint32 memory_gb = 6;
+  string hostd_version = 7;
+  // Jobs still running from before a reconnect.
+  repeated string running_job_ids = 8;
+}
+
+message Heartbeat {
+  google.protobuf.Timestamp at = 1;
+  // Paused VMs ready for assignment, per VM size.
+  map<uint32, uint32> warm_vms_by_vcpu = 2;
+  repeated SnapshotRef snapshots = 3;
+  double cpu_steal_fraction = 4;
+  double cpu_busy_fraction = 5;
+  uint64 nvme_free_bytes = 6;
+  bool draining = 7;
+}
+
+message SnapshotRef {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_BASE_IMAGE = 1;
+    KIND_PREBUILD = 2;
+    KIND_STICKY = 3;
+  }
+  Kind kind = 1;
+  string repo = 2; // empty for base images
+  string key = 3; // prebuild key, sticky volume key, or image name@version
+  string id = 4;  // engine-specific snapshot id
+}
+
+enum Phase {
+  PHASE_UNSPECIFIED = 0;
+  PHASE_HOST_ASSIGNED = 1;
+  PHASE_VM_RESUMED = 2;
+  PHASE_RUNNER_ONLINE = 3;
+  PHASE_JOB_STARTED = 4;
+  PHASE_JOB_FINISHED = 5;
+  PHASE_VM_DESTROYED = 6;
+}
+
+message JobEvent {
+  string job_id = 1;
+  Phase phase = 2;
+  google.protobuf.Timestamp at = 3;
+}
+
+message JobResult {
+  string job_id = 1;
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    OUTCOME_SUCCEEDED = 1;
+    OUTCOME_FAILED = 2;      // the job's own failure
+    OUTCOME_INFRA_ERROR = 3; // Tachyon's failure; eligible for opt-in re-run
+    OUTCOME_CANCELLED = 4;
+  }
+  Outcome outcome = 2;
+  string error = 3;
+  // Measured usage, fed into the job's scheduling profile.
+  double avg_busy_vcpu = 4;
+  double peak_memory_gb = 5;
+  // Sticky volumes promoted to the repo's new head (trusted, successful runs).
+  repeated SnapshotRef promoted = 6;
+  // Set when the job was a prebuild build.
+  SnapshotRef prebuild = 7;
+  // Echoed from AssignJob so a new prebuild records what it was built on.
+  string base_image = 8;
+  string commit = 9;
+}
+
+// ---- control plane -> hostd ----
+
+message LinkResponse {
+  oneof msg {
+    AssignJob assign = 1;
+    PreFork pre_fork = 2;
+    CancelJob cancel = 3;
+    Drain drain = 4;
+    PullSnapshot pull_snapshot = 5;
+  }
+}
+
+enum Trust {
+  TRUST_UNSPECIFIED = 0;
+  TRUST_TRUSTED = 1;
+  TRUST_UNTRUSTED = 2;
+  TRUST_UNTRUSTED_FORK = 3;
+}
+
+message Volume {
+  string key = 1;   // e.g. "docker"
+  string mount = 2; // e.g. /var/lib/docker
+  // Snapshot to clone; empty = start from an empty volume.
+  string source_snapshot_id = 3;
+}
+
+message AssignJob {
+  string job_id = 1;
+  string tenant = 2;
+  string repo = 3;
+  string commit = 4;
+  uint32 vcpu = 5;
+  uint32 memory_gb = 6;
+  string base_image = 7; // name@version
+  // Prebuild snapshot to fork; empty = fork the base image.
+  string prebuild_snapshot_id = 8;
+  string prebuild_match = 9; // full | partial | none
+  repeated Volume volumes = 10;
+  Trust trust = 11;
+  // Per-VM CPU weight for the cgroup, from the job's usage profile.
+  uint32 cpu_weight = 12;
+  // Passed to the guest over vsock and never written to host disk.
+  GuestConfig guest = 13;
+  // When set, this run builds a prebuild: hostd snapshots the job disk
+  // after the warm steps instead of discarding it.
+  PrebuildBuild prebuild_build = 14;
+}
+
+message GuestConfig {
+  // Single-use runner registration (GitHub JIT config). Secret: never log.
+  bytes runner_config = 1;
+  map<string, string> env = 2; // mirrors, cache URL, TACHYON_* vars
+  // Files to write before the runner starts (daemon.json, apt proxy, ...).
+  map<string, bytes> files = 3;
+}
+
+message PrebuildBuild {
+  string key = 1;
+  repeated string warm_commands = 2;
+  repeated string keep_paths = 3;
+  repeated string scrub_paths = 4;
+  // Egress allowlist while warm steps run; no repo secrets are present.
+  repeated string egress_allowlist = 5;
+}
+
+// A job for this repo is likely coming; fork its disk now.
+message PreFork {
+  string pre_fork_id = 1;
+  string repo = 2;
+  string prebuild_snapshot_id = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message CancelJob {
+  string job_id = 1;
+}
+
+message Drain {
+  bool drain = 1; // false undrains
+}
+
+message PullSnapshot {
+  SnapshotRef snapshot = 1;
+  string from_host_id = 2;
+  string from_address = 3;
+}

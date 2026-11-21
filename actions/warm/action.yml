@@ -1,0 +1,39 @@
+name: Tachyon warm
+description: >
+  Restores workspace paths (node_modules etc.) from the repo's Tachyon
+  prebuild after actions/checkout, and sets TACHYON_WARM=hit or miss.
+  Outside Tachyon it does nothing and sets TACHYON_WARM=miss, so workflows
+  stay portable.
+outputs:
+  warm:
+    description: hit or miss
+    value: ${{ steps.warm.outputs.warm }}
+runs:
+  using: composite
+  steps:
+    - id: warm
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The guest agent stashes prebuild workspace paths here before the
+        # runner starts, because actions/checkout cleans untracked files.
+        stash="${TACHYON_WARM_STASH:-/opt/tachyon/warm}"
+        result=miss
+        if [[ -n "${TACHYON_JOB_ID:-}" && "${TACHYON_PREBUILD_MATCH:-none}" == full && -n "${TACHYON_WARM_PATHS:-}" ]]; then
+          result=hit
+          IFS=: read -ra paths <<< "$TACHYON_WARM_PATHS"
+          for p in "${paths[@]}"; do
+            case "$p" in /*|*..*) echo "::warning::skipping unsafe warm path $p"; result=miss; continue;; esac
+            if [[ -e "$stash/$p" ]]; then
+              mkdir -p "$(dirname "$GITHUB_WORKSPACE/$p")"
+              rm -rf "${GITHUB_WORKSPACE:?}/$p"
+              # Same filesystem: a rename, not a copy.
+              mv "$stash/$p" "$GITHUB_WORKSPACE/$p"
+            else
+              result=miss
+            fi
+          done
+        fi
+        echo "TACHYON_WARM=$result" >> "$GITHUB_ENV"
+        echo "warm=$result" >> "$GITHUB_OUTPUT"
+        echo "Tachyon warm: $result (prebuild match: ${TACHYON_PREBUILD_MATCH:-n/a})"
