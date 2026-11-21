@@ -22,6 +22,14 @@ type System interface {
 	// Run runs a command to completion and returns its exit code. A non-nil
 	// error means it could not be started or waited for.
 	Run(ctx context.Context, cmd Command) (int, error)
+	// Quiesce makes everything the job wrote durable. hostd destroys the VM
+	// and snapshots its disks (the new prebuild, promoted sticky volumes) as
+	// soon as it reads the result, so this runs before the result is sent.
+	// It kills the processes the job left running under dirs, unmounts
+	// every mount at or under dirs (deepest first) and flushes; a
+	// block-backed filesystem that cannot be unmounted is frozen instead.
+	// An error means the disks may not be consistent.
+	Quiesce(ctx context.Context, dirs []string) error
 	PowerOff() error
 }
 

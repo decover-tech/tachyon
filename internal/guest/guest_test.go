@@ -31,6 +31,9 @@ type fakeSys struct {
 	runs      []Command
 	run       func(c Command) (int, error)
 	poweroff  bool
+	// quiesced is the dirs passed to Quiesce; quiesceErr is its result.
+	quiesced   []string
+	quiesceErr error
 }
 
 func newFakeSys() *fakeSys {
@@ -82,6 +85,13 @@ func (f *fakeSys) Run(_ context.Context, c Command) (int, error) {
 		return 0, nil
 	}
 	return run(c)
+}
+
+func (f *fakeSys) Quiesce(_ context.Context, dirs []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.quiesced = append(f.quiesced, dirs...)
+	return f.quiesceErr
 }
 
 func (f *fakeSys) PowerOff() error {
@@ -599,6 +609,73 @@ func TestServe(t *testing.T) {
 	var res Result
 	if err := json.Unmarshal(b, &res); err != nil || res.ExitCode != 0 || len(res.Phases) != 2 {
 		t.Fatalf("result = %s (%v)", b, err)
+	}
+}
+
+// checkQuiesced fails the test if the result is written before the job's
+// filesystems were quiesced: hostd snapshots the disks once it reads it.
+type checkQuiesced struct {
+	t    *testing.T
+	sys  *fakeSys
+	want []string
+	buf  bytes.Buffer
+}
+
+func (c *checkQuiesced) Write(b []byte) (int, error) {
+	c.sys.mu.Lock()
+	got := slices.Clone(c.sys.quiesced)
+	c.sys.mu.Unlock()
+	if !slices.Equal(got, c.want) {
+		c.t.Errorf("result written with quiesced = %q, want %q", got, c.want)
+	}
+	return c.buf.Write(b)
+}
+
+func TestServeQuiescesBeforeResult(t *testing.T) {
+	for _, prebuild := range []bool{false, true} {
+		e := newTestEnv(t)
+		e.sys.run = runnerOutput(successLines, 0)
+		p := jobPayload()
+		if prebuild {
+			p.Prebuild = &Prebuild{WarmCommands: []string{"npm ci"}}
+		}
+		body, _ := json.Marshal(p)
+		out := &checkQuiesced{t: t, sys: e.sys, want: []string{e.agent.Layout.Root, e.agent.Layout.JobMount}}
+		if err := e.agent.Serve(context.Background(), rw{frame(t, body), out}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := ReadFrame(&out.buf, 1<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var res Result
+		if err := json.Unmarshal(b, &res); err != nil || res.ExitCode != 0 {
+			t.Fatalf("prebuild=%v: result = %s (%v)", prebuild, b, err)
+		}
+	}
+}
+
+// If the disks can't be made consistent, the job must not look successful,
+// or hostd would keep a torn snapshot as a prebuild or sticky volume.
+func TestServeQuiesceFailureFailsJob(t *testing.T) {
+	e := newTestEnv(t)
+	e.sys.run = runnerOutput(successLines, 0)
+	e.sys.quiesceErr = errors.New("/dev/vdb busy and could not be frozen")
+	body, _ := json.Marshal(jobPayload())
+	var out bytes.Buffer
+	if err := e.agent.Serve(context.Background(), rw{frame(t, body), &out}); err != nil {
+		t.Fatal(err)
+	}
+	b, err := ReadFrame(&out, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(b, &res); err != nil || res.ExitCode != ExitAgentError {
+		t.Fatalf("result = %s (%v)", b, err)
+	}
+	if !strings.Contains(e.logs.String(), "quiesce disks") {
+		t.Fatalf("logs = %s", e.logs)
 	}
 }
 

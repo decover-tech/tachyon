@@ -76,8 +76,18 @@ type Agent struct {
 	Now    func() time.Time
 }
 
+// quiesceTimeout bounds how long Serve waits for the job's processes to
+// die and its filesystems to unmount before reporting.
+const quiesceTimeout = 30 * time.Second
+
 // Serve reads one payload from conn, runs it, and writes the result back.
 // The caller powers the VM off afterwards.
+//
+// hostd takes the result as the end of the job: it destroys the VM and
+// snapshots the job disk and sticky volumes right away. So before writing
+// the result Serve stops whatever the job left running and flushes and
+// unmounts (or freezes) the job's filesystems. If that fails the result
+// reports ExitAgentError, so hostd keeps no snapshot of the disks.
 func (a *Agent) Serve(ctx context.Context, conn io.ReadWriter) error {
 	p, err := ReadPayload(conn)
 	if err != nil {
@@ -86,6 +96,10 @@ func (a *Agent) Serve(ctx context.Context, conn io.ReadWriter) error {
 		return err
 	}
 	res := a.Run(ctx, p)
+	if err := a.quiesce(ctx); err != nil {
+		a.log().Error("quiesce disks", "job", p.JobID, "err", err)
+		res.ExitCode = ExitAgentError
+	}
 	if err := WriteResult(conn, res); err != nil {
 		return fmt.Errorf("write result: %w", err)
 	}
@@ -125,6 +139,13 @@ func (a *Agent) run(ctx context.Context, p *Payload, res *Result) (int, error) {
 		return 0, fmt.Errorf("stash warm paths: %w", err)
 	}
 	return a.runRunner(ctx, p, env, res)
+}
+
+func (a *Agent) quiesce(ctx context.Context) error {
+	// Runs even if ctx was cancelled (SIGTERM): the disks still need it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), quiesceTimeout)
+	defer cancel()
+	return a.Sys.Quiesce(ctx, []string{a.Layout.Root, a.Layout.JobMount})
 }
 
 func (a *Agent) log() *slog.Logger {

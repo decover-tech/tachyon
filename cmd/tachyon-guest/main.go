@@ -1,7 +1,10 @@
 // tachyon-guest is the agent inside each job VM. It waits on vsock for the
 // job payload from hostd, mounts the job's disks, writes its config files,
 // and runs the GitHub runner (or, for a prebuild build, the warm steps).
-// It reports the result back over the same connection and powers the VM off.
+// It then kills what the job left running and unmounts (or freezes) the
+// job's filesystems, because hostd snapshots the disks as soon as it has the
+// result; only then does it report the result over the same connection and
+// power the VM off.
 //
 // It starts at boot, before the base snapshot is taken, so every VM restored
 // from the snapshot is already waiting in accept().
