@@ -28,6 +28,11 @@ type Record struct {
 	VCPU          int
 	PrebuildMatch string // full | partial | none
 	Burst         bool   // ran on burst rather than owned capacity
+	Region        string
+	// HostLoad is the host's reserved CPU over physical vCPUs right after
+	// this job was placed; above 1 the job ran oversubscribed.
+	HostLoad float64
+	Outcome  string // succeeded | failed | infra_error | cancelled
 
 	mu        sync.Mutex
 	phases    map[Phase]time.Time

@@ -257,3 +257,26 @@ func TestRemoveHost(t *testing.T) {
 		t.Fatalf("job id should be free after host removal: %v", err)
 	}
 }
+
+func TestLoad(t *testing.T) {
+	s := New(nil)
+	s.UpsertHost(host("h", "us", 8, 1000))
+	if s.Load("h") != 0 || s.Load("missing") != 0 {
+		t.Fatal("idle load")
+	}
+	for _, id := range []string{"a", "b"} {
+		if _, err := s.Place(sub(id, 4)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Place(sub("c", 2)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Load("h"); got != 1.25 {
+		t.Fatalf("Load = %v, want 1.25 (10 of 8 vCPU reserved)", got)
+	}
+	s.Release("a", nil)
+	if got := s.Load("h"); got != 0.75 {
+		t.Fatalf("Load after release = %v", got)
+	}
+}

@@ -6,14 +6,16 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::cpustat::CpuSampler;
 use crate::hypervisor::Hypervisor;
 use crate::lifecycle::Agent;
 use crate::pb::{self, host_link_service_client::HostLinkServiceClient};
 use crate::storage::Storage;
+use crate::telemetry::Metrics;
 
 #[derive(Debug, Clone)]
 pub struct HostInfo {
@@ -53,6 +55,7 @@ pub struct Link<H: Hypervisor + 'static, S: Storage + 'static> {
     pub control_plane: String,
     pub inventory: Arc<Inventory>,
     pub draining: Arc<AtomicBool>,
+    pub metrics: Arc<Metrics>,
     running: Arc<Mutex<HashMap<String, ()>>>,
 }
 
@@ -67,6 +70,7 @@ where
             control_plane,
             inventory: Arc::default(),
             draining: Arc::default(),
+            metrics: Arc::new(Metrics::global()),
             running: Arc::default(),
         }
     }
@@ -103,21 +107,31 @@ where
         tracing::info!(control_plane = %self.control_plane, "linked");
 
         let hb = {
-            let (tx, agent, inv, draining) = (
+            let (tx, agent, inv, draining, metrics, running) = (
                 tx.clone(),
                 self.agent.clone(),
                 self.inventory.clone(),
                 self.draining.clone(),
+                self.metrics.clone(),
+                self.running.clone(),
             );
             tokio::spawn(async move {
+                let cpu = CpuSampler::default();
                 let mut tick = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     tick.tick().await;
+                    let warm = agent.warm_counts();
+                    let sample = cpu.sample();
+                    let n_running = running.lock().unwrap().len();
+                    metrics.update_host(&warm, sample, n_running);
+                    let (busy, steal) = sample.unwrap_or_default();
                     let beat = pb::Heartbeat {
                         at: Some(now()),
-                        warm_vms_by_vcpu: agent.warm_counts(),
+                        warm_vms_by_vcpu: warm,
                         snapshots: inv.list(),
                         draining: draining.load(Ordering::Relaxed),
+                        cpu_busy_fraction: busy,
+                        cpu_steal_fraction: steal,
                         ..Default::default()
                     };
                     if tx
@@ -164,16 +178,23 @@ where
     fn start_job(&self, job: pb::AssignJob, tx: mpsc::Sender<pb::LinkRequest>) {
         let job_id = job.job_id.clone();
         self.running.lock().unwrap().insert(job_id.clone(), ());
-        let (agent, inv, running) = (
+        let (agent, inv, running, metrics) = (
             self.agent.clone(),
             self.inventory.clone(),
             self.running.clone(),
+            self.metrics.clone(),
         );
+        let assigned = Instant::now();
         tracing::info!(job = %job_id, repo = %job.repo, vcpu = job.vcpu, "assigned");
         tokio::task::spawn_blocking(move || {
             let ev_tx = tx.clone();
             let ev_job = job_id.clone();
+            let ev_metrics = metrics.clone();
+            let (vcpu, prebuild_match) = (job.vcpu, job.prebuild_match.clone());
             let events = move |phase: pb::Phase| {
+                if phase == pb::Phase::VmResumed {
+                    ev_metrics.job_resumed(vcpu, &prebuild_match, assigned.elapsed());
+                }
                 let e = pb::JobEvent {
                     job_id: ev_job.clone(),
                     phase: phase as i32,
@@ -189,6 +210,7 @@ where
                 inv.put(p.clone());
             }
             running.lock().unwrap().remove(&job_id);
+            metrics.job_finished(job.vcpu, result.outcome());
             tracing::info!(job = %job_id, outcome = ?result.outcome(), "finished");
             // TODO: buffer results across reconnects instead of dropping
             // them when this session's stream has closed.

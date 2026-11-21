@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/grpc"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
@@ -23,7 +24,11 @@ import (
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/scheduler"
+	"github.com/decover-tech/tachyon/internal/telemetry"
 )
+
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	httpAddr := flag.String("http", ":8080", "webhook listen address")
@@ -35,6 +40,11 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	clickhouseURL := flag.String("clickhouse-url", "", "ClickHouse HTTP URL for job records (password in TACHYON_CLICKHOUSE_PASSWORD)")
+	clickhouseTable := flag.String("clickhouse-table", "tachyon.job_records", "ClickHouse table for job records")
+	clickhouseUser := flag.String("clickhouse-user", "", "ClickHouse user")
+	priceOwned := flag.Float64("price-owned-vcpu-hour", 0, "owned capacity cost per vCPU-hour, for cost per job-minute")
+	priceBurst := flag.Float64("price-burst-vcpu-hour", 0, "burst capacity cost per vCPU-hour, for cost per job-minute")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -60,6 +70,51 @@ func main() {
 			images[n] = v
 		}
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Metrics go over OTLP to the collector when the standard OTEL_*
+	// endpoint variables are set; otherwise they are not exported.
+	var meter metric.Meter
+	if os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != "" || os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT") != "" {
+		mp, err := telemetry.NewOTLPMeterProvider(ctx, "tachyon-controlplane", version, 0)
+		if err != nil {
+			log.Error("otel", "err", err)
+			os.Exit(1)
+		}
+		defer func() {
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = mp.Shutdown(sctx)
+		}()
+		meter = mp.Meter("github.com/decover-tech/tachyon/controlplane")
+	}
+	metrics, err := telemetry.NewMetrics(meter)
+	if err != nil {
+		log.Error("metrics", "err", err)
+		os.Exit(1)
+	}
+	var jobRecords controlplane.JobRecordSink
+	if *clickhouseURL != "" {
+		b := &telemetry.Batcher{
+			Sink: &telemetry.ClickHouse{
+				URL:      *clickhouseURL,
+				Table:    *clickhouseTable,
+				User:     *clickhouseUser,
+				Password: os.Getenv("TACHYON_CLICKHOUSE_PASSWORD"),
+			},
+			Log: log,
+		}
+		if err := metrics.ObserveBatcher(b); err != nil {
+			log.Error("metrics", "err", err)
+			os.Exit(1)
+		}
+		batcherDone := make(chan struct{})
+		go func() { b.Run(ctx); close(batcherDone) }()
+		defer func() { <-batcherDone }()
+		jobRecords = b
+	}
+
 	secrets := &controlplane.MemSecrets{}
 	core := &controlplane.Core{
 		Scheduler: scheduler.New(nil),
@@ -69,6 +124,14 @@ func main() {
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
 		Log:       log,
+
+		Metrics:    metrics,
+		JobRecords: jobRecords,
+		Pricing:    telemetry.Pricing{OwnedVCPUHour: *priceOwned, BurstVCPUHour: *priceBurst},
+	}
+	if err := core.RegisterMetrics(); err != nil {
+		log.Error("metrics", "err", err)
+		os.Exit(1)
 	}
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
@@ -76,9 +139,6 @@ func main() {
 		Secrets:       secrets,
 		Log:           log,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", adapter.Handler(core))

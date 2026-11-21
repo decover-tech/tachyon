@@ -14,6 +14,9 @@ path = "src/main.rs"
 anyhow = "1"
 base64 = "0.22"
 libc = "0.2"
+opentelemetry = { version = "0.27.1", default-features = false, features = ["metrics"] }
+opentelemetry-otlp = { version = "0.27.0", default-features = false, features = ["metrics", "grpc-tonic"] }
+opentelemetry_sdk = { version = "0.27.1", default-features = false, features = ["metrics", "rt-tokio"] }
 prost = "0.13"
 prost-types = "0.13"
 serde = { version = "1", features = ["derive"] }

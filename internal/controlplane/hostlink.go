@@ -19,6 +19,7 @@ type hostConn struct {
 	region string
 	out    chan *hostlinkv1.LinkResponse
 	snaps  []*hostlinkv1.SnapshotRef
+	hb     *hostlinkv1.Heartbeat // latest, for host metrics
 	closed chan struct{}
 }
 
@@ -139,6 +140,7 @@ func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostli
 	}
 	c.mu.Lock()
 	hc.snaps = hb.GetSnapshots()
+	hc.hb = hb
 	c.mu.Unlock()
 	c.Scheduler.UpsertHost(scheduler.Host{
 		ID:            hc.id,
@@ -171,7 +173,7 @@ func (s *HostLink) onJobEvent(ev *hostlinkv1.JobEvent) {
 	if ev.GetAt() != nil {
 		at = ev.GetAt().AsTime()
 	}
-	rec.Mark(p, at)
+	s.Core.markPhase(rec, p, at)
 }
 
 func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
@@ -181,6 +183,7 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 		usage = &scheduler.Usage{CPU: r.GetAvgBusyVcpu(), MemGB: r.GetPeakMemoryGb()}
 	}
 	c.Scheduler.Release(r.GetJobId(), usage)
+	c.finishJob(r)
 	if pb := r.GetPrebuild(); pb != nil && pb.GetKey() != "" {
 		c.Prebuilds.Register(prebuild.Snapshot{
 			Repo:      pb.GetRepo(),

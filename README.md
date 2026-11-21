@@ -21,7 +21,8 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/prebuild/` | Go | `.tachyon/prebuild.yml`, prebuild keys, full/partial/none fork planning, credential scrub list |
 | `internal/cache/` | Go | Actions cache scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction |
 | `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
-| `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
+| `internal/telemetry/` | Go | Per-job phase record (pickup, billable seconds, cost), OpenTelemetry fleet metrics, ClickHouse export |
+| `deploy/observability/` | config | OTel Collector, Prometheus SLO rules, Grafana dashboards, ClickHouse job-record schema, local docker-compose stack |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
 | `examples/node-go/` | – | A repo config and workflow using Tachyon |
 | `gen/` | Go | Generated from `proto/` by `buf generate`; checked in |
@@ -64,6 +65,8 @@ TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
 
 Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090`.
 
+Observability is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `http://otel-collector:4318`) to export metrics, and `-clickhouse-url` (with `-clickhouse-user` and `TACHYON_CLICKHOUSE_PASSWORD`) to write one row per finished job to `tachyon.job_records`. `-price-owned-vcpu-hour` and `-price-burst-vcpu-hour` set the capacity cost behind the cost-per-job-minute panels. See [deploy/observability](deploy/observability) for the collector, dashboards, SLO alerts and schema.
+
 ### Running hostd (Linux host)
 
 | Variable | Required | Default |
@@ -77,6 +80,7 @@ Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9
 | `TACHYON_FAILURE_DOMAIN`, `TACHYON_ARCH` | no | `default`, `x86_64` |
 | `TACHYON_CH_BINARY`, `TACHYON_CH_REMOTE` | no | `/usr/local/bin/cloud-hypervisor`, `/usr/local/bin/ch-remote` |
 | `TACHYON_RUN_DIR`, `TACHYON_CGROUP`, `TACHYON_BASE_UID` | no | `/run/tachyon/vms`, `/sys/fs/cgroup/tachyon`, `100000` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | unset: no metrics export. OTLP/gRPC, e.g. `http://otel-collector:4317` |
 
 ## Status
 
@@ -90,6 +94,6 @@ Not built yet:
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
 - **Persistence.** The control plane keeps all state in memory, and secrets need a managed key store.
 - **mTLS** on the host link, plus **hostd**: cancel, pre-fork, peer snapshot pull, inventory rebuild on restart, and buffering results across reconnects.
-- **Observability export** (OpenTelemetry/Prometheus/ClickHouse) and billing.
+- **Billing** on top of the job records, and per-step timings and cache hit counts in them (nothing reports steps or cache lookups yet).
 
 Open decisions D2 to D6 and the open questions are listed at the end of the [design doc](docs/architecture.md#risks-open-questions-and-decisions).

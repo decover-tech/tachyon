@@ -55,6 +55,11 @@ type Core struct {
 	CacheURL  string
 	Log       *slog.Logger
 	Now       func() time.Time
+	// Observability (optional): fleet metrics, the per-job record export
+	// (ClickHouse) and the capacity prices used to cost each job.
+	Metrics    *telemetry.Metrics
+	JobRecords JobRecordSink
+	Pricing    telemetry.Pricing
 
 	mu       sync.Mutex
 	hosts    map[string]*hostConn
@@ -145,8 +150,13 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	if len(sub.ChangedFiles) == 0 {
 		sub.ChangedFiles = c.hints[spec.Repo+"@"+spec.Commit].changed
 	}
+	_, resubmitted := c.records[spec.JobID]
 	c.records[spec.JobID] = rec
 	c.mu.Unlock()
+	if !resubmitted {
+		c.Metrics.JobQueued(ctx, sub.Region, spec.Hardware.VCPU)
+	}
+	rec.Region = sub.Region
 
 	a, err := c.Scheduler.Place(sub)
 	switch {
@@ -160,11 +170,16 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		if c.Burst == nil {
 			return err
 		}
-		return c.Burst.Submit(ctx, sub)
+		if err := c.Burst.Submit(ctx, sub); err != nil {
+			return err
+		}
+		c.Metrics.JobBurst(ctx, sub.Region, spec.Hardware.VCPU)
+		return nil
 	case err != nil:
 		return err
 	}
 	rec.HostID = a.HostID
+	rec.HostLoad = c.Scheduler.Load(a.HostID)
 	rec.Mark(telemetry.HostAssigned, c.now())
 
 	msg, err := c.buildAssign(ctx, sub, a)
@@ -181,6 +196,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		c.Scheduler.Release(spec.JobID, nil)
 		return fmt.Errorf("host %s not connected", a.HostID)
 	}
+	rec.Region = hc.region
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
 	return nil
 }

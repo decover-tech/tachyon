@@ -1,0 +1,57 @@
+# Local observability stack: OTel Collector -> Prometheus -> Grafana, plus
+# ClickHouse for job records and logs. Run the control plane on the host
+# with:
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+#   TACHYON_CLICKHOUSE_PASSWORD=tachyon \
+#   bin/tachyon-controlplane -clickhouse-url http://localhost:8123 -clickhouse-user tachyon ...
+# Grafana is on http://localhost:3000 (admin/admin).
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_USER: tachyon
+      CLICKHOUSE_PASSWORD: tachyon
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports: ["8123:8123"]
+    volumes:
+      - ./clickhouse:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      CLICKHOUSE_USER: tachyon
+      CLICKHOUSE_PASSWORD: tachyon
+    ports: ["4317:4317", "4318:4318"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    depends_on: [clickhouse]
+
+  blackbox:
+    image: prom/blackbox-exporter:v0.25.0
+    command: ["--config.file=/etc/blackbox/blackbox.yml"]
+    volumes:
+      - ./blackbox/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    ports: ["9091:9090"] # host 9090 is the control plane's hostlink port
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+    depends_on: [otel-collector, blackbox]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    ports: ["3000:3000"]
+    environment:
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      CLICKHOUSE_USER: tachyon
+      CLICKHOUSE_PASSWORD: tachyon
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus, clickhouse]
