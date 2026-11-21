@@ -128,7 +128,7 @@ Guardrails: per-VM CPU weights in cgroups, host-level CPU steal monitoring, and 
 
 **Capacity mix.** Owned hosts are sized to cover roughly the 60th to 70th percentile of weekly demand, so they stay busy. Peaks overflow to on-demand cloud instances or hourly bare metal. Spot instances take only short jobs, since an interruption kills the job.
 
-**Filling the troughs.** Scheduled and nightly workflows can opt into a discounted, deferrable class that runs when the fleet is quiet. This turns idle off-peak capacity into revenue instead of cost.
+**Filling the troughs.** Scheduled and nightly workflows can opt into a discounted, deferrable class that runs when the fleet is quiet. This turns idle off-peak capacity into revenue instead of cost. A deferrable job is admitted while fleet CPU use is under half of capacity and waits for owned capacity rather than bursting, but it always starts within a bound (6 hours by default, `-max-deferral`), at which point it is placed like any other job. It is billed at a discount off the runner rate (40% as a placeholder until D5). The control plane measures the class's effect: time-weighted fleet utilization with and without deferrable jobs, and how long deferred jobs waited.
 
 ## Cache, Docker layer and mirror services
 

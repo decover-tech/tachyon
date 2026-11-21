@@ -29,6 +29,10 @@ type Record struct {
 	PrebuildMatch string // full | partial | none
 	Burst         bool   // ran on burst rather than owned capacity
 
+	// Deferrable jobs ran in the discounted off-peak class. Their pickup
+	// includes time spent deferred, so fleet pickup SLOs exclude them.
+	Deferrable bool
+
 	mu        sync.Mutex
 	phases    map[Phase]time.Time
 	steps     []Step

@@ -257,3 +257,42 @@ func TestRemoveHost(t *testing.T) {
 		t.Fatalf("job id should be free after host removal: %v", err)
 	}
 }
+
+func TestPlaceOverdueSkipsGateAndSplitsUtilization(t *testing.T) {
+	s := New(nil)
+	s.UpsertHost(host("h", "us", 16, 1000))
+	if _, err := s.Place(sub("busy", 12)); err != nil {
+		t.Fatal(err)
+	}
+	d := sub("d1", 2)
+	d.Deferrable = true
+	if _, err := s.Place(d); !errors.Is(err, ErrDeferred) {
+		t.Fatalf("want ErrDeferred, got %v", err)
+	}
+	if _, err := s.PlaceOverdue(d); err != nil {
+		t.Fatalf("overdue job should skip the gate: %v", err)
+	}
+	total, def := s.UtilizationSplit()
+	if total != 14.0/16 || def != 2.0/16 {
+		t.Fatalf("split = %v, %v", total, def)
+	}
+	// Overdue placement still respects capacity: 18 of 20 (1.25x) fits.
+	d2 := sub("d2", 4)
+	d2.Deferrable = true
+	if _, err := s.PlaceOverdue(d2); err != nil {
+		t.Fatal(err)
+	}
+	d3 := sub("d3", 4)
+	d3.Deferrable = true
+	if _, err := s.PlaceOverdue(d3); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("want ErrNoCapacity, got %v", err)
+	}
+	s.Release("d1", nil)
+	s.Release("d2", nil)
+	if _, def := s.UtilizationSplit(); def != 0 {
+		t.Fatalf("deferrable share after release = %v", def)
+	}
+	if total, def := New(nil).UtilizationSplit(); total != 0 || def != 0 {
+		t.Fatalf("empty fleet split = %v, %v", total, def)
+	}
+}

@@ -53,6 +53,9 @@ type allocation struct {
 	memGB   float64
 	tenant  string
 	profile string
+	// deferrable marks capacity used by the off-peak class, so the fleet's
+	// utilization gain from it can be measured.
+	deferrable bool
 }
 
 type hostState struct {
@@ -135,15 +138,27 @@ func (s *Scheduler) demand(sub jobapi.Submission) (cpu, mem float64) {
 	return cpu, mem
 }
 
-// Place chooses a host and reserves capacity for the job.
+// Place chooses a host and reserves capacity for the job. A deferrable job
+// gets ErrDeferred while the fleet is busy.
 func (s *Scheduler) Place(sub jobapi.Submission) (Assignment, error) {
+	return s.place(sub, true)
+}
+
+// PlaceOverdue places a deferrable job that has waited as long as its class
+// allows: it skips the quiet-fleet gate but is still counted as off-peak
+// capacity.
+func (s *Scheduler) PlaceOverdue(sub jobapi.Submission) (Assignment, error) {
+	return s.place(sub, false)
+}
+
+func (s *Scheduler) place(sub jobapi.Submission, gate bool) (Assignment, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	spec := sub.Spec
 	if _, dup := s.allocs[spec.JobID]; dup {
 		return Assignment{}, fmt.Errorf("job %s already placed", spec.JobID)
 	}
-	if sub.Deferrable {
+	if sub.Deferrable && gate {
 		threshold := s.DeferBelowUtil
 		if threshold == 0 {
 			threshold = 0.5
@@ -217,7 +232,7 @@ func (s *Scheduler) Place(sub jobapi.Submission) (Assignment, error) {
 	best := cands[0]
 	best.h.cpuUsed += cpu
 	best.h.memUsed += mem
-	s.allocs[spec.JobID] = allocation{hostID: best.h.ID, repo: spec.Repo, cpu: cpu, memGB: mem, tenant: spec.Tenant, profile: sub.Profile}
+	s.allocs[spec.JobID] = allocation{hostID: best.h.ID, repo: spec.Repo, cpu: cpu, memGB: mem, tenant: spec.Tenant, profile: sub.Profile, deferrable: sub.Deferrable}
 	return Assignment{HostID: best.h.ID, Locality: best.loc, CPU: cpu, MemGB: mem}, nil
 }
 
@@ -288,4 +303,26 @@ func (s *Scheduler) utilizationLocked() float64 {
 		return 1
 	}
 	return used / total
+}
+
+// UtilizationSplit is Utilization broken out by class: total is all reserved
+// CPU over physical vCPUs, deferrable the share of it held by off-peak jobs.
+func (s *Scheduler) UtilizationSplit() (total, deferrable float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var vcpu, def float64
+	for _, h := range s.hosts {
+		if !h.Draining {
+			vcpu += float64(h.VCPU)
+		}
+	}
+	if vcpu == 0 {
+		return 0, 0
+	}
+	for _, a := range s.allocs {
+		if h := s.hosts[a.hostID]; a.deferrable && h != nil && !h.Draining {
+			def += a.cpu
+		}
+	}
+	return s.utilizationLocked(), def / vcpu
 }
