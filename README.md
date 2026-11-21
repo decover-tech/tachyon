@@ -64,6 +64,8 @@ TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
 
 Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090`.
 
+Set `TACHYON_DATABASE_URL` (e.g. `postgres://tachyon@db:5432/tachyon`) to keep jobs, pending runners, hosts, the prebuild registry and job records in Postgres; migrations run on start. After a restart, queued jobs are resubmitted and jobs running on hosts keep their reservations until the hosts reconnect and report results. Without it, state is in memory. The Postgres store tests run when `TACHYON_TEST_POSTGRES_DSN` is set.
+
 ### Running hostd (Linux host)
 
 | Variable | Required | Default |
@@ -88,7 +90,7 @@ Not built yet:
 - **Base image and snapshot pipeline**, built from `actions/runner-images`, plus virtio-pmem/DAX sharing.
 - **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
-- **Persistence.** The control plane keeps all state in memory, and secrets need a managed key store.
+- **Secrets persistence.** Control plane state is in Postgres, but secrets (JIT runner configs) are still in memory until a managed key store lands; after a restart, jobs whose JIT config was lost are re-dispatched by the adapter's reconcile loop.
 - **mTLS** on the host link, plus **hostd**: cancel, pre-fork, peer snapshot pull, inventory rebuild on restart, and buffering results across reconnects.
 - **Observability export** (OpenTelemetry/Prometheus/ClickHouse) and billing.
 

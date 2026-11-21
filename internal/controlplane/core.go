@@ -17,6 +17,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/scheduler"
+	"github.com/decover-tech/tachyon/internal/store"
 	"github.com/decover-tech/tachyon/internal/telemetry"
 )
 
@@ -55,6 +56,8 @@ type Core struct {
 	CacheURL  string
 	Log       *slog.Logger
 	Now       func() time.Time
+	// Store, if set, persists jobs, hosts and job records (see persist.go).
+	Store store.Store
 
 	mu       sync.Mutex
 	hosts    map[string]*hostConn
@@ -147,6 +150,12 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	}
 	c.records[spec.JobID] = rec
 	c.mu.Unlock()
+	// A job that can't be recorded is refused, so the frontend retries it
+	// rather than it being lost in a restart.
+	if err := c.saveJob(ctx, sub, store.JobQueued, nil); err != nil {
+		return fmt.Errorf("persist job %s: %w", spec.JobID, err)
+	}
+	defer c.saveRecord(ctx, rec)
 
 	a, err := c.Scheduler.Place(sub)
 	switch {
@@ -154,14 +163,18 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		c.mu.Lock()
 		c.deferred = append(c.deferred, sub)
 		c.mu.Unlock()
+		c.noteJob(ctx, sub, store.JobDeferred, nil)
 		return nil
 	case errors.Is(err, scheduler.ErrNoCapacity):
 		rec.Burst = true
 		if c.Burst == nil {
+			c.noteJob(ctx, sub, store.JobRejected, nil)
 			return err
 		}
+		c.noteJob(ctx, sub, store.JobBurst, nil)
 		return c.Burst.Submit(ctx, sub)
 	case err != nil:
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return err
 	}
 	rec.HostID = a.HostID
@@ -170,6 +183,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	msg, err := c.buildAssign(ctx, sub, a)
 	if err != nil {
 		c.Scheduler.Release(spec.JobID, nil)
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return err
 	}
 	rec.PrebuildMatch = msg.PrebuildMatch
@@ -179,8 +193,12 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	c.mu.Unlock()
 	if hc == nil {
 		c.Scheduler.Release(spec.JobID, nil)
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return fmt.Errorf("host %s not connected", a.HostID)
 	}
+	// Recorded before sending: after a restart the reservation is restored
+	// and released by the host's result.
+	c.noteJob(ctx, sub, store.JobAssigned, &a)
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
 	return nil
 }

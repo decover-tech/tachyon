@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,9 @@ type hostConn struct {
 	out    chan *hostlinkv1.LinkResponse
 	snaps  []*hostlinkv1.SnapshotRef
 	closed chan struct{}
+	// Last host view written to Core.Store; guarded by Core.mu.
+	saved      *scheduler.Host
+	savedRatio float64
 }
 
 func (h *hostConn) send(m *hostlinkv1.LinkResponse) {
@@ -64,14 +68,16 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 	c.mu.Unlock()
 	c.log().Info("host connected", "host", hc.id, "region", hc.region)
 
-	c.Scheduler.UpsertHost(scheduler.Host{
+	helloHost := scheduler.Host{
 		ID:            hc.id,
 		Region:        hello.GetRegion(),
 		FailureDomain: hello.GetFailureDomain(),
 		Arch:          jobapi.Arch(hello.GetArch()),
 		VCPU:          int(hello.GetVcpu()),
 		MemGB:         int(hello.GetMemoryGb()),
-	})
+	}
+	c.Scheduler.UpsertHost(helloHost)
+	c.saveHost(context.Background(), hc, helloHost)
 
 	sendErr := make(chan error, 1)
 	go func() {
@@ -140,7 +146,7 @@ func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostli
 	c.mu.Lock()
 	hc.snaps = hb.GetSnapshots()
 	c.mu.Unlock()
-	c.Scheduler.UpsertHost(scheduler.Host{
+	h := scheduler.Host{
 		ID:            hc.id,
 		Region:        hello.GetRegion(),
 		FailureDomain: hello.GetFailureDomain(),
@@ -149,7 +155,9 @@ func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostli
 		MemGB:         int(hello.GetMemoryGb()),
 		Snapshots:     repos,
 		Draining:      hb.GetDraining(),
-	})
+	}
+	c.Scheduler.UpsertHost(h)
+	c.saveHost(context.Background(), hc, h)
 }
 
 var phaseMap = map[hostlinkv1.Phase]telemetry.Phase{
@@ -172,6 +180,7 @@ func (s *HostLink) onJobEvent(ev *hostlinkv1.JobEvent) {
 		at = ev.GetAt().AsTime()
 	}
 	rec.Mark(p, at)
+	s.Core.saveRecord(context.Background(), rec)
 }
 
 func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
@@ -181,6 +190,8 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 		usage = &scheduler.Usage{CPU: r.GetAvgBusyVcpu(), MemGB: r.GetPeakMemoryGb()}
 	}
 	c.Scheduler.Release(r.GetJobId(), usage)
+	c.finishJob(context.Background(), r.GetJobId())
+	c.saveRecord(context.Background(), c.Record(r.GetJobId()))
 	if pb := r.GetPrebuild(); pb != nil && pb.GetKey() != "" {
 		c.Prebuilds.Register(prebuild.Snapshot{
 			Repo:      pb.GetRepo(),

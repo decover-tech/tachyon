@@ -1,6 +1,8 @@
 // tachyon-controlplane serves GitHub webhooks (HTTP) and the hostd link
-// (gRPC). State is in memory; this is the development build of the control
-// plane, not a production deployment.
+// (gRPC). With TACHYON_DATABASE_URL set, jobs, pending runners, hosts, the
+// prebuild registry and job records are kept in Postgres and reloaded on
+// start; without it state is in memory (development only). Secrets are
+// always in memory until the managed key store lands.
 package main
 
 import (
@@ -23,6 +25,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/scheduler"
+	"github.com/decover-tech/tachyon/internal/store/postgres"
 )
 
 func main() {
@@ -60,11 +63,29 @@ func main() {
 			images[n] = v
 		}
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	secrets := &controlplane.MemSecrets{}
+	var prebuilds controlplane.Prebuilds = &controlplane.MemPrebuilds{}
+	var db *postgres.Store
+	if dsn := os.Getenv("TACHYON_DATABASE_URL"); dsn != "" {
+		db, err = postgres.Open(ctx, dsn)
+		if err != nil {
+			log.Error("open database", "err", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+		prebuilds = &controlplane.StorePrebuilds{Store: db, OnError: func(op string, err error) {
+			log.Warn("prebuild registry", "op", op, "err", err)
+		}}
+	} else {
+		log.Warn("TACHYON_DATABASE_URL not set: state is in memory and lost on restart")
+	}
 	core := &controlplane.Core{
 		Scheduler: scheduler.New(nil),
 		Images:    images,
-		Prebuilds: &controlplane.MemPrebuilds{},
+		Prebuilds: prebuilds,
 		Secrets:   secrets,
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
@@ -76,9 +97,20 @@ func main() {
 		Secrets:       secrets,
 		Log:           log,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	if db != nil {
+		core.Store, adapter.Store = db, db
+		st, err := core.Restore(ctx)
+		if err != nil {
+			log.Error("restore control plane state", "err", err)
+			os.Exit(1)
+		}
+		pending, err := adapter.Restore(ctx)
+		if err != nil {
+			log.Error("restore pending runners", "err", err)
+			os.Exit(1)
+		}
+		log.Info("state restored", "hosts", st.Hosts, "running", st.Running, "requeued", st.Requeued, "pending_runners", pending)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", adapter.Handler(core))
