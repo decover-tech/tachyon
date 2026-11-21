@@ -132,10 +132,17 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostlinkv1.Heartbeat) {
 	c := s.Core
 	repos := map[string]bool{}
+	var images []string
 	for _, ref := range hb.GetSnapshots() {
-		if ref.GetKind() == hostlinkv1.SnapshotRef_KIND_PREBUILD {
+		switch ref.GetKind() {
+		case hostlinkv1.SnapshotRef_KIND_PREBUILD:
 			repos[ref.GetRepo()] = true
+		case hostlinkv1.SnapshotRef_KIND_BASE_IMAGE:
+			images = append(images, ref.GetKey())
 		}
+	}
+	if ir, ok := c.Images.(ImageRollout); ok {
+		ir.ObserveHost(hc.id, images, hb.GetDraining())
 	}
 	c.mu.Lock()
 	hc.snaps = hb.GetSnapshots()
@@ -181,6 +188,9 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 		usage = &scheduler.Usage{CPU: r.GetAvgBusyVcpu(), MemGB: r.GetPeakMemoryGb()}
 	}
 	c.Scheduler.Release(r.GetJobId(), usage)
+	if ir, ok := c.Images.(ImageRollout); ok {
+		ir.ObserveResult(r.GetJobId(), r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_INFRA_ERROR)
+	}
 	if pb := r.GetPrebuild(); pb != nil && pb.GetKey() != "" {
 		c.Prebuilds.Register(prebuild.Snapshot{
 			Repo:      pb.GetRepo(),

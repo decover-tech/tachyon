@@ -1,0 +1,47 @@
+# Tachyon's ubuntu-24.04 base image: GitHub's ubuntu-24.04 runner image,
+# built from the public actions/runner-images templates, trimmed, as an ext4
+# file. Rebuilt weekly by .github/workflows/base-image.yml; the commit below
+# is bumped deliberately (in a PR) so every build is pinned to known inputs.
+name: ubuntu-24.04
+arch: x86_64
+
+runner_images:
+  repo: https://github.com/actions/runner-images
+  commit: 0e63d4f9d2c29043b4cf1d2f40d1812a7cde1369
+  template: images/ubuntu/templates/build.ubuntu-24_04.pkr.hcl
+  toolset: images/ubuntu/toolsets/toolset-2404.json
+
+# Ubuntu's cloud image root filesystem, the same starting point as GitHub's
+# VM image. Pinned to a dated release by digest.
+base_rootfs:
+  url: https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64-root.tar.xz
+  sha256: ec6972af8ea2bd05c55299d204e5ae3f91769b84cfaec7395639d236a39f9a03
+
+rootfs_size_gb: 64
+
+# Upstream scripts Tachyon leaves out. Anything not listed here runs, so
+# the image tracks ubuntu-24.04 by default. Each entry must still exist
+# upstream: a rename there fails the plan instead of silently un-trimming.
+skip:
+  - script: install-android-sdk.sh
+    reason: ~12 GB of SDKs used by few jobs; Android repos opt in to a separate image later
+  - script: Install-PowerShellAzModules.ps1
+    reason: Azure PowerShell modules (several GB, Azure-hosted workflows only)
+  - script: install-haskell.sh
+    reason: ghcup toolchains are large and rarely used; haskell/actions/setup installs on demand
+  - script: install-julia.sh
+    reason: rarely used; julia-actions/setup-julia installs on demand
+  - script: install-swift.sh
+    reason: rarely used on Linux; swift-actions/setup-swift installs on demand
+  - script: install-homebrew.sh
+    reason: Linuxbrew is not root-owned and pulls from the network at job time; rarely used on Linux
+  - script: configure-snap.sh
+    reason: snapd needs a full systemd boot with squashfs mounts, which the microVM guest does not run
+
+# Values for ${var.*} in the template (upstream defaults).
+vars:
+  helper_script_folder: /imagegeneration/helpers
+  installer_script_folder: /imagegeneration/installers
+  image_folder: /imagegeneration
+  imagedata_file: /imagegeneration/imagedata.json
+  image_os: ubuntu24

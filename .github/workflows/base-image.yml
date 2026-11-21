@@ -1,0 +1,58 @@
+name: base-image
+# Weekly rebuild of the ubuntu-24.04 base image (images/ubuntu-24.04).
+# Off until the repo variable TACHYON_IMAGE_PIPELINE is "enabled": it needs
+# a builder with ~100 GB of disk (TACHYON_IMAGE_BUILDER) and the signing key
+# secret TACHYON_IMAGE_SIGNING_KEY (ed25519, PKCS#8 PEM), and the public
+# half(s) in the variable TACHYON_IMAGE_TRUSTED_KEYS (PEM).
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC; the version is that Monday's date
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Image version (default: this week's Monday, e.g. 2026-11-16 or 2026-11-16.1)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: vars.TACHYON_IMAGE_PIPELINE == 'enabled'
+    runs-on: ${{ vars.TACHYON_IMAGE_BUILDER || 'ubuntu-24.04' }}
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o "$RUNNER_TEMP/tachyon-image" ./cmd/tachyon-image
+      - name: Build
+        env:
+          KEY: ${{ secrets.TACHYON_IMAGE_SIGNING_KEY }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          umask 077
+          printf '%s\n' "$KEY" > "$RUNNER_TEMP/signing.pem"
+          sudo TACHYON_IMAGE="$RUNNER_TEMP/tachyon-image" \
+            TACHYON_IMAGE_VERSION="$VERSION" \
+            TACHYON_IMAGE_SIGNING_KEY="$RUNNER_TEMP/signing.pem" \
+            images/ubuntu-24.04/build.sh "$RUNNER_TEMP/image"
+          rm -f "$RUNNER_TEMP/signing.pem"
+      - name: Verify signature and digests
+        env:
+          TRUSTED: ${{ vars.TACHYON_IMAGE_TRUSTED_KEYS }}
+        run: |
+          printf '%s\n' "$TRUSTED" > "$RUNNER_TEMP/trusted.pem"
+          "$RUNNER_TEMP/tachyon-image" verify -trust "$RUNNER_TEMP/trusted.pem" \
+            -dir "$RUNNER_TEMP/image" "$RUNNER_TEMP/image/manifest.signed.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: base-image-manifest
+          path: |
+            ${{ runner.temp }}/image/manifest.json
+            ${{ runner.temp }}/image/manifest.signed.json
+            ${{ runner.temp }}/image/sbom.spdx.json
+      # Pushing rootfs.ext4 to the image store and publishing the signed
+      # manifest to the control plane's rollout is not wired yet: the image
+      # store is not decided (see docs/architecture.md, Distribution).

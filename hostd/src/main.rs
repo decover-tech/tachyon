@@ -4,6 +4,7 @@
 //!
 //! Configuration is by environment variable (see README).
 
+pub mod baseimage;
 pub mod hypervisor;
 pub mod jailer;
 pub mod lifecycle;
@@ -57,6 +58,14 @@ async fn main() -> Result<()> {
         );
     }
 
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("prepare-image") {
+        let image = args
+            .get(2)
+            .context("usage: tachyon-hostd prepare-image <name@version>")?;
+        return prepare_image(image);
+    }
+
     let info = link::HostInfo {
         host_id: env("TACHYON_HOST_ID")?,
         region: env("TACHYON_REGION")?,
@@ -86,10 +95,42 @@ async fn main() -> Result<()> {
         tokio::task::spawn_blocking(move || agent.refill_pool()).await??;
     }
     let link = link::Link::new(agent, info, env("TACHYON_CONTROL_PLANE")?);
+    if let Ok(root) = std::env::var("TACHYON_IMAGES") {
+        // Report prepared base images so the control plane's rollout knows
+        // which versions this host can run.
+        for r in baseimage::ImageStore::new(root.into()).snapshot_refs() {
+            link.inventory.put(r);
+        }
+    }
     tokio::select! {
         _ = link.run() => {}
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down; running VMs are left to finish"),
     }
+    Ok(())
+}
+
+/// Verifies a base image in TACHYON_IMAGES and builds its per-size paused
+/// snapshots (see baseimage.rs).
+fn prepare_image(image: &str) -> Result<()> {
+    let mut store = baseimage::ImageStore::new(PathBuf::from(env("TACHYON_IMAGES")?));
+    store.default_kernel = std::env::var("TACHYON_GUEST_KERNEL").ok().map(Into::into);
+    if let Ok(c) = std::env::var("TACHYON_GUEST_CMDLINE") {
+        store.cmdline = c;
+    }
+    let trust = std::fs::read_to_string(env("TACHYON_IMAGE_TRUST")?)?;
+    let trusted = baseimage::parse_public_keys(&trust)?;
+    let builder = baseimage::ChSnapshotBuilder {
+        binary: env_or("TACHYON_CH_BINARY", "/usr/local/bin/cloud-hypervisor").into(),
+        ch_remote: env_or("TACHYON_CH_REMOTE", "/usr/local/bin/ch-remote").into(),
+        work_dir: env_or("TACHYON_RUN_DIR", "/run/tachyon/vms").into(),
+        cgroup_parent: env_or("TACHYON_CGROUP", "/sys/fs/cgroup/tachyon").into(),
+        // One below the first VM slot's IDs, so it never collides with a job VM.
+        uid: env_or("TACHYON_BASE_UID", "100000").parse::<u32>()? - 1,
+        gid: env_or("TACHYON_BASE_UID", "100000").parse::<u32>()? - 1,
+        ready_timeout: std::time::Duration::from_secs(300),
+    };
+    let built = store.prepare(image, &trusted, &builder)?;
+    tracing::info!(image, ?built, "base image prepared");
     Ok(())
 }
 
