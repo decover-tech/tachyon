@@ -258,7 +258,11 @@ type LinkRequest struct {
 	//	*LinkRequest_Heartbeat
 	//	*LinkRequest_JobEvent
 	//	*LinkRequest_JobResult
-	Msg           isLinkRequest_Msg `protobuf_oneof:"msg"`
+	Msg isLinkRequest_Msg `protobuf_oneof:"msg"`
+	// Set on job events and results. hostd keeps each one, across reconnects
+	// and restarts, until the control plane acks its seq; it may resend after
+	// a reconnect, so handling must be idempotent. 0 = not acked.
+	Seq           uint64 `protobuf:"varint,5,opt,name=seq,proto3" json:"seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -334,6 +338,13 @@ func (x *LinkRequest) GetJobResult() *JobResult {
 		}
 	}
 	return nil
+}
+
+func (x *LinkRequest) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
 }
 
 type isLinkRequest_Msg interface {
@@ -808,6 +819,7 @@ type LinkResponse struct {
 	//	*LinkResponse_Cancel
 	//	*LinkResponse_Drain
 	//	*LinkResponse_PullSnapshot
+	//	*LinkResponse_Ack
 	Msg           isLinkResponse_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -895,6 +907,15 @@ func (x *LinkResponse) GetPullSnapshot() *PullSnapshot {
 	return nil
 }
 
+func (x *LinkResponse) GetAck() *Ack {
+	if x != nil {
+		if x, ok := x.Msg.(*LinkResponse_Ack); ok {
+			return x.Ack
+		}
+	}
+	return nil
+}
+
 type isLinkResponse_Msg interface {
 	isLinkResponse_Msg()
 }
@@ -919,6 +940,10 @@ type LinkResponse_PullSnapshot struct {
 	PullSnapshot *PullSnapshot `protobuf:"bytes,5,opt,name=pull_snapshot,json=pullSnapshot,proto3,oneof"`
 }
 
+type LinkResponse_Ack struct {
+	Ack *Ack `protobuf:"bytes,6,opt,name=ack,proto3,oneof"`
+}
+
 func (*LinkResponse_Assign) isLinkResponse_Msg() {}
 
 func (*LinkResponse_PreFork) isLinkResponse_Msg() {}
@@ -928,6 +953,53 @@ func (*LinkResponse_Cancel) isLinkResponse_Msg() {}
 func (*LinkResponse_Drain) isLinkResponse_Msg() {}
 
 func (*LinkResponse_PullSnapshot) isLinkResponse_Msg() {}
+
+func (*LinkResponse_Ack) isLinkResponse_Msg() {}
+
+// Acknowledges every LinkRequest on this stream with seq <= this one.
+type Ack struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Seq           uint64                 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Ack) Reset() {
+	*x = Ack{}
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Ack) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Ack) ProtoMessage() {}
+
+func (x *Ack) ProtoReflect() protoreflect.Message {
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Ack.ProtoReflect.Descriptor instead.
+func (*Ack) Descriptor() ([]byte, []int) {
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *Ack) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
 
 type Volume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -941,7 +1013,7 @@ type Volume struct {
 
 func (x *Volume) Reset() {
 	*x = Volume{}
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[7]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -953,7 +1025,7 @@ func (x *Volume) String() string {
 func (*Volume) ProtoMessage() {}
 
 func (x *Volume) ProtoReflect() protoreflect.Message {
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[7]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -966,7 +1038,7 @@ func (x *Volume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Volume.ProtoReflect.Descriptor instead.
 func (*Volume) Descriptor() ([]byte, []int) {
-	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{7}
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Volume) GetKey() string {
@@ -1017,7 +1089,7 @@ type AssignJob struct {
 
 func (x *AssignJob) Reset() {
 	*x = AssignJob{}
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[8]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1029,7 +1101,7 @@ func (x *AssignJob) String() string {
 func (*AssignJob) ProtoMessage() {}
 
 func (x *AssignJob) ProtoReflect() protoreflect.Message {
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[8]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1042,7 +1114,7 @@ func (x *AssignJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AssignJob.ProtoReflect.Descriptor instead.
 func (*AssignJob) Descriptor() ([]byte, []int) {
-	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{8}
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *AssignJob) GetJobId() string {
@@ -1156,7 +1228,7 @@ type GuestConfig struct {
 
 func (x *GuestConfig) Reset() {
 	*x = GuestConfig{}
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[9]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1168,7 +1240,7 @@ func (x *GuestConfig) String() string {
 func (*GuestConfig) ProtoMessage() {}
 
 func (x *GuestConfig) ProtoReflect() protoreflect.Message {
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[9]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1181,7 +1253,7 @@ func (x *GuestConfig) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuestConfig.ProtoReflect.Descriptor instead.
 func (*GuestConfig) Descriptor() ([]byte, []int) {
-	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{9}
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GuestConfig) GetRunnerConfig() []byte {
@@ -1219,7 +1291,7 @@ type PrebuildBuild struct {
 
 func (x *PrebuildBuild) Reset() {
 	*x = PrebuildBuild{}
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[10]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1231,7 +1303,7 @@ func (x *PrebuildBuild) String() string {
 func (*PrebuildBuild) ProtoMessage() {}
 
 func (x *PrebuildBuild) ProtoReflect() protoreflect.Message {
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[10]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1244,7 +1316,7 @@ func (x *PrebuildBuild) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PrebuildBuild.ProtoReflect.Descriptor instead.
 func (*PrebuildBuild) Descriptor() ([]byte, []int) {
-	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{10}
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PrebuildBuild) GetKey() string {
@@ -1295,7 +1367,7 @@ type PreFork struct {
 
 func (x *PreFork) Reset() {
 	*x = PreFork{}
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[11]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1307,7 +1379,7 @@ func (x *PreFork) String() string {
 func (*PreFork) ProtoMessage() {}
 
 func (x *PreFork) ProtoReflect() protoreflect.Message {
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[11]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1320,7 +1392,7 @@ func (x *PreFork) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreFork.ProtoReflect.Descriptor instead.
 func (*PreFork) Descriptor() ([]byte, []int) {
-	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{11}
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PreFork) GetPreForkId() string {
@@ -1360,7 +1432,7 @@ type CancelJob struct {
 
 func (x *CancelJob) Reset() {
 	*x = CancelJob{}
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[12]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1372,7 +1444,7 @@ func (x *CancelJob) String() string {
 func (*CancelJob) ProtoMessage() {}
 
 func (x *CancelJob) ProtoReflect() protoreflect.Message {
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[12]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1385,7 +1457,7 @@ func (x *CancelJob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelJob.ProtoReflect.Descriptor instead.
 func (*CancelJob) Descriptor() ([]byte, []int) {
-	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{12}
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CancelJob) GetJobId() string {
@@ -1404,7 +1476,7 @@ type Drain struct {
 
 func (x *Drain) Reset() {
 	*x = Drain{}
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[13]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1416,7 +1488,7 @@ func (x *Drain) String() string {
 func (*Drain) ProtoMessage() {}
 
 func (x *Drain) ProtoReflect() protoreflect.Message {
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[13]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1429,7 +1501,7 @@ func (x *Drain) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Drain.ProtoReflect.Descriptor instead.
 func (*Drain) Descriptor() ([]byte, []int) {
-	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{13}
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Drain) GetDrain() bool {
@@ -1450,7 +1522,7 @@ type PullSnapshot struct {
 
 func (x *PullSnapshot) Reset() {
 	*x = PullSnapshot{}
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[14]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1462,7 +1534,7 @@ func (x *PullSnapshot) String() string {
 func (*PullSnapshot) ProtoMessage() {}
 
 func (x *PullSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[14]
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1475,7 +1547,7 @@ func (x *PullSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PullSnapshot.ProtoReflect.Descriptor instead.
 func (*PullSnapshot) Descriptor() ([]byte, []int) {
-	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{14}
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *PullSnapshot) GetSnapshot() *SnapshotRef {
@@ -1503,13 +1575,14 @@ var File_tachyon_hostlink_v1_hostlink_proto protoreflect.FileDescriptor
 
 const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"\n" +
-	"\"tachyon/hostlink/v1/hostlink.proto\x12\x13tachyon.hostlink.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x87\x02\n" +
+	"\"tachyon/hostlink/v1/hostlink.proto\x12\x13tachyon.hostlink.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x99\x02\n" +
 	"\vLinkRequest\x122\n" +
 	"\x05hello\x18\x01 \x01(\v2\x1a.tachyon.hostlink.v1.HelloH\x00R\x05hello\x12>\n" +
 	"\theartbeat\x18\x02 \x01(\v2\x1e.tachyon.hostlink.v1.HeartbeatH\x00R\theartbeat\x12<\n" +
 	"\tjob_event\x18\x03 \x01(\v2\x1d.tachyon.hostlink.v1.JobEventH\x00R\bjobEvent\x12?\n" +
 	"\n" +
-	"job_result\x18\x04 \x01(\v2\x1e.tachyon.hostlink.v1.JobResultH\x00R\tjobResultB\x05\n" +
+	"job_result\x18\x04 \x01(\v2\x1e.tachyon.hostlink.v1.JobResultH\x00R\tjobResult\x12\x10\n" +
+	"\x03seq\x18\x05 \x01(\x04R\x03seqB\x05\n" +
 	"\x03msg\"\xf1\x01\n" +
 	"\x05Hello\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
@@ -1561,14 +1634,17 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"\x11OUTCOME_SUCCEEDED\x10\x01\x12\x12\n" +
 	"\x0eOUTCOME_FAILED\x10\x02\x12\x17\n" +
 	"\x13OUTCOME_INFRA_ERROR\x10\x03\x12\x15\n" +
-	"\x11OUTCOME_CANCELLED\x10\x04\"\xc2\x02\n" +
+	"\x11OUTCOME_CANCELLED\x10\x04\"\xf0\x02\n" +
 	"\fLinkResponse\x128\n" +
 	"\x06assign\x18\x01 \x01(\v2\x1e.tachyon.hostlink.v1.AssignJobH\x00R\x06assign\x129\n" +
 	"\bpre_fork\x18\x02 \x01(\v2\x1c.tachyon.hostlink.v1.PreForkH\x00R\apreFork\x128\n" +
 	"\x06cancel\x18\x03 \x01(\v2\x1e.tachyon.hostlink.v1.CancelJobH\x00R\x06cancel\x122\n" +
 	"\x05drain\x18\x04 \x01(\v2\x1a.tachyon.hostlink.v1.DrainH\x00R\x05drain\x12H\n" +
-	"\rpull_snapshot\x18\x05 \x01(\v2!.tachyon.hostlink.v1.PullSnapshotH\x00R\fpullSnapshotB\x05\n" +
-	"\x03msg\"^\n" +
+	"\rpull_snapshot\x18\x05 \x01(\v2!.tachyon.hostlink.v1.PullSnapshotH\x00R\fpullSnapshot\x12,\n" +
+	"\x03ack\x18\x06 \x01(\v2\x18.tachyon.hostlink.v1.AckH\x00R\x03ackB\x05\n" +
+	"\x03msg\"\x17\n" +
+	"\x03Ack\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\"^\n" +
 	"\x06Volume\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05mount\x18\x02 \x01(\tR\x05mount\x12,\n" +
@@ -1654,7 +1730,7 @@ func file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP() []byte {
 }
 
 var file_tachyon_hostlink_v1_hostlink_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_tachyon_hostlink_v1_hostlink_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_tachyon_hostlink_v1_hostlink_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_tachyon_hostlink_v1_hostlink_proto_goTypes = []any{
 	(Phase)(0),                    // 0: tachyon.hostlink.v1.Phase
 	(Trust)(0),                    // 1: tachyon.hostlink.v1.Trust
@@ -1667,53 +1743,55 @@ var file_tachyon_hostlink_v1_hostlink_proto_goTypes = []any{
 	(*JobEvent)(nil),              // 8: tachyon.hostlink.v1.JobEvent
 	(*JobResult)(nil),             // 9: tachyon.hostlink.v1.JobResult
 	(*LinkResponse)(nil),          // 10: tachyon.hostlink.v1.LinkResponse
-	(*Volume)(nil),                // 11: tachyon.hostlink.v1.Volume
-	(*AssignJob)(nil),             // 12: tachyon.hostlink.v1.AssignJob
-	(*GuestConfig)(nil),           // 13: tachyon.hostlink.v1.GuestConfig
-	(*PrebuildBuild)(nil),         // 14: tachyon.hostlink.v1.PrebuildBuild
-	(*PreFork)(nil),               // 15: tachyon.hostlink.v1.PreFork
-	(*CancelJob)(nil),             // 16: tachyon.hostlink.v1.CancelJob
-	(*Drain)(nil),                 // 17: tachyon.hostlink.v1.Drain
-	(*PullSnapshot)(nil),          // 18: tachyon.hostlink.v1.PullSnapshot
-	nil,                           // 19: tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntry
-	nil,                           // 20: tachyon.hostlink.v1.GuestConfig.EnvEntry
-	nil,                           // 21: tachyon.hostlink.v1.GuestConfig.FilesEntry
-	(*timestamppb.Timestamp)(nil), // 22: google.protobuf.Timestamp
+	(*Ack)(nil),                   // 11: tachyon.hostlink.v1.Ack
+	(*Volume)(nil),                // 12: tachyon.hostlink.v1.Volume
+	(*AssignJob)(nil),             // 13: tachyon.hostlink.v1.AssignJob
+	(*GuestConfig)(nil),           // 14: tachyon.hostlink.v1.GuestConfig
+	(*PrebuildBuild)(nil),         // 15: tachyon.hostlink.v1.PrebuildBuild
+	(*PreFork)(nil),               // 16: tachyon.hostlink.v1.PreFork
+	(*CancelJob)(nil),             // 17: tachyon.hostlink.v1.CancelJob
+	(*Drain)(nil),                 // 18: tachyon.hostlink.v1.Drain
+	(*PullSnapshot)(nil),          // 19: tachyon.hostlink.v1.PullSnapshot
+	nil,                           // 20: tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntry
+	nil,                           // 21: tachyon.hostlink.v1.GuestConfig.EnvEntry
+	nil,                           // 22: tachyon.hostlink.v1.GuestConfig.FilesEntry
+	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
 }
 var file_tachyon_hostlink_v1_hostlink_proto_depIdxs = []int32{
 	5,  // 0: tachyon.hostlink.v1.LinkRequest.hello:type_name -> tachyon.hostlink.v1.Hello
 	6,  // 1: tachyon.hostlink.v1.LinkRequest.heartbeat:type_name -> tachyon.hostlink.v1.Heartbeat
 	8,  // 2: tachyon.hostlink.v1.LinkRequest.job_event:type_name -> tachyon.hostlink.v1.JobEvent
 	9,  // 3: tachyon.hostlink.v1.LinkRequest.job_result:type_name -> tachyon.hostlink.v1.JobResult
-	22, // 4: tachyon.hostlink.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
-	19, // 5: tachyon.hostlink.v1.Heartbeat.warm_vms_by_vcpu:type_name -> tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntry
+	23, // 4: tachyon.hostlink.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	20, // 5: tachyon.hostlink.v1.Heartbeat.warm_vms_by_vcpu:type_name -> tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntry
 	7,  // 6: tachyon.hostlink.v1.Heartbeat.snapshots:type_name -> tachyon.hostlink.v1.SnapshotRef
 	2,  // 7: tachyon.hostlink.v1.SnapshotRef.kind:type_name -> tachyon.hostlink.v1.SnapshotRef.Kind
 	0,  // 8: tachyon.hostlink.v1.JobEvent.phase:type_name -> tachyon.hostlink.v1.Phase
-	22, // 9: tachyon.hostlink.v1.JobEvent.at:type_name -> google.protobuf.Timestamp
+	23, // 9: tachyon.hostlink.v1.JobEvent.at:type_name -> google.protobuf.Timestamp
 	3,  // 10: tachyon.hostlink.v1.JobResult.outcome:type_name -> tachyon.hostlink.v1.JobResult.Outcome
 	7,  // 11: tachyon.hostlink.v1.JobResult.promoted:type_name -> tachyon.hostlink.v1.SnapshotRef
 	7,  // 12: tachyon.hostlink.v1.JobResult.prebuild:type_name -> tachyon.hostlink.v1.SnapshotRef
-	12, // 13: tachyon.hostlink.v1.LinkResponse.assign:type_name -> tachyon.hostlink.v1.AssignJob
-	15, // 14: tachyon.hostlink.v1.LinkResponse.pre_fork:type_name -> tachyon.hostlink.v1.PreFork
-	16, // 15: tachyon.hostlink.v1.LinkResponse.cancel:type_name -> tachyon.hostlink.v1.CancelJob
-	17, // 16: tachyon.hostlink.v1.LinkResponse.drain:type_name -> tachyon.hostlink.v1.Drain
-	18, // 17: tachyon.hostlink.v1.LinkResponse.pull_snapshot:type_name -> tachyon.hostlink.v1.PullSnapshot
-	11, // 18: tachyon.hostlink.v1.AssignJob.volumes:type_name -> tachyon.hostlink.v1.Volume
-	1,  // 19: tachyon.hostlink.v1.AssignJob.trust:type_name -> tachyon.hostlink.v1.Trust
-	13, // 20: tachyon.hostlink.v1.AssignJob.guest:type_name -> tachyon.hostlink.v1.GuestConfig
-	14, // 21: tachyon.hostlink.v1.AssignJob.prebuild_build:type_name -> tachyon.hostlink.v1.PrebuildBuild
-	20, // 22: tachyon.hostlink.v1.GuestConfig.env:type_name -> tachyon.hostlink.v1.GuestConfig.EnvEntry
-	21, // 23: tachyon.hostlink.v1.GuestConfig.files:type_name -> tachyon.hostlink.v1.GuestConfig.FilesEntry
-	22, // 24: tachyon.hostlink.v1.PreFork.expires_at:type_name -> google.protobuf.Timestamp
-	7,  // 25: tachyon.hostlink.v1.PullSnapshot.snapshot:type_name -> tachyon.hostlink.v1.SnapshotRef
-	4,  // 26: tachyon.hostlink.v1.HostLinkService.Link:input_type -> tachyon.hostlink.v1.LinkRequest
-	10, // 27: tachyon.hostlink.v1.HostLinkService.Link:output_type -> tachyon.hostlink.v1.LinkResponse
-	27, // [27:28] is the sub-list for method output_type
-	26, // [26:27] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	13, // 13: tachyon.hostlink.v1.LinkResponse.assign:type_name -> tachyon.hostlink.v1.AssignJob
+	16, // 14: tachyon.hostlink.v1.LinkResponse.pre_fork:type_name -> tachyon.hostlink.v1.PreFork
+	17, // 15: tachyon.hostlink.v1.LinkResponse.cancel:type_name -> tachyon.hostlink.v1.CancelJob
+	18, // 16: tachyon.hostlink.v1.LinkResponse.drain:type_name -> tachyon.hostlink.v1.Drain
+	19, // 17: tachyon.hostlink.v1.LinkResponse.pull_snapshot:type_name -> tachyon.hostlink.v1.PullSnapshot
+	11, // 18: tachyon.hostlink.v1.LinkResponse.ack:type_name -> tachyon.hostlink.v1.Ack
+	12, // 19: tachyon.hostlink.v1.AssignJob.volumes:type_name -> tachyon.hostlink.v1.Volume
+	1,  // 20: tachyon.hostlink.v1.AssignJob.trust:type_name -> tachyon.hostlink.v1.Trust
+	14, // 21: tachyon.hostlink.v1.AssignJob.guest:type_name -> tachyon.hostlink.v1.GuestConfig
+	15, // 22: tachyon.hostlink.v1.AssignJob.prebuild_build:type_name -> tachyon.hostlink.v1.PrebuildBuild
+	21, // 23: tachyon.hostlink.v1.GuestConfig.env:type_name -> tachyon.hostlink.v1.GuestConfig.EnvEntry
+	22, // 24: tachyon.hostlink.v1.GuestConfig.files:type_name -> tachyon.hostlink.v1.GuestConfig.FilesEntry
+	23, // 25: tachyon.hostlink.v1.PreFork.expires_at:type_name -> google.protobuf.Timestamp
+	7,  // 26: tachyon.hostlink.v1.PullSnapshot.snapshot:type_name -> tachyon.hostlink.v1.SnapshotRef
+	4,  // 27: tachyon.hostlink.v1.HostLinkService.Link:input_type -> tachyon.hostlink.v1.LinkRequest
+	10, // 28: tachyon.hostlink.v1.HostLinkService.Link:output_type -> tachyon.hostlink.v1.LinkResponse
+	28, // [28:29] is the sub-list for method output_type
+	27, // [27:28] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_tachyon_hostlink_v1_hostlink_proto_init() }
@@ -1733,6 +1811,7 @@ func file_tachyon_hostlink_v1_hostlink_proto_init() {
 		(*LinkResponse_Cancel)(nil),
 		(*LinkResponse_Drain)(nil),
 		(*LinkResponse_PullSnapshot)(nil),
+		(*LinkResponse_Ack)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1740,7 +1819,7 @@ func file_tachyon_hostlink_v1_hostlink_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tachyon_hostlink_v1_hostlink_proto_rawDesc), len(file_tachyon_hostlink_v1_hostlink_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   18,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

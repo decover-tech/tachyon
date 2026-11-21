@@ -364,3 +364,38 @@ func TestShortRepo(t *testing.T) {
 		}
 	}
 }
+
+func TestSequencedMessagesAreAckedAndReplaysAreIdempotent(t *testing.T) {
+	e := newEnv()
+	s := e.connect(t, "h1", "us", 4, 16)
+	s.push(t, heartbeat(false))
+	if err := e.core.Submit(context.Background(), e.submission(t, "j1", 4)); err != nil {
+		t.Fatal(err)
+	}
+	s.next(t) // assign
+
+	result := &hostlinkv1.LinkRequest{Seq: 7, Msg: &hostlinkv1.LinkRequest_JobResult{JobResult: &hostlinkv1.JobResult{
+		JobId: "j1", Outcome: hostlinkv1.JobResult_OUTCOME_SUCCEEDED,
+	}}}
+	s.push(t, result)
+	if a := s.next(t).GetAck(); a == nil || a.GetSeq() != 7 {
+		t.Fatalf("want ack 7, got %v", a)
+	}
+	// hostd resends unacked messages after a reconnect; a duplicate result
+	// must not release capacity twice.
+	s.push(t, result)
+	if a := s.next(t).GetAck(); a == nil || a.GetSeq() != 7 {
+		t.Fatalf("want ack 7 again, got %v", a)
+	}
+	if err := e.core.Submit(context.Background(), e.submission(t, "j2", 4)); err != nil {
+		t.Fatal(err)
+	}
+	s.next(t) // assign j2
+	if err := e.core.Submit(context.Background(), e.submission(t, "j3", 4)); !errors.Is(err, scheduler.ErrNoCapacity) {
+		t.Fatalf("duplicate result released capacity twice: %v", err)
+	}
+
+	// Unsequenced messages (older hosts) get no ack.
+	s.push(t, heartbeat(false))
+	s.none(t)
+}
