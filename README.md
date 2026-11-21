@@ -18,7 +18,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/frontend/github/` | Go | GitHub Actions adapter: labels, trust derivation, webhook verification, repo-scoped JIT runners, reconcile loop, minimal App REST client |
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
 | `internal/scheduler/` | Go | Placement by prebuild locality, packing by measured usage, CPU oversubscription with automatic step-back, deferrable class |
-| `internal/prebuild/` | Go | `.tachyon/prebuild.yml`, prebuild keys, full/partial/none fork planning, credential scrub list |
+| `internal/prebuild/` | Go | `.tachyon/prebuild.yml`, prebuild keys, full/partial/none fork planning, credential scrub list, and the prebuild manager: push/nightly triggers, refresh vs. full warm-up, token-free clone commands |
 | `internal/cache/` | Go | Actions cache scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction |
 | `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
 | `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
@@ -80,13 +80,13 @@ Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9
 
 ## Status
 
-Built and unit-tested: the job spec, GitHub adapter, scheduler, prebuild config/keys/fork planning, cache scoping, mirror config, the hostlink protocol on both sides, and the hostd job lifecycle against fake hypervisor and storage backends.
+Built and unit-tested: the job spec, GitHub adapter, scheduler, prebuild config/keys/fork planning, the prebuild manager (against a fake platform source), cache scoping, mirror config, the hostlink protocol on both sides, and the hostd job lifecycle against fake hypervisor and storage backends.
 
 Not built yet:
 
 - **Guest agent.** The in-VM process that receives the vsock payload, mounts disks, stashes warm paths, starts the runner and reports results. hostd's side of that protocol exists (`hostd/src/hypervisor.rs`).
 - **Base image and snapshot pipeline**, built from `actions/runner-images`, plus virtio-pmem/DAX sharing.
-- **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
+- **Prebuild manager in production.** Triggers, planning and dispatch exist, but trigger state is in memory and no build has run on a real host.
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
 - **Persistence.** The control plane keeps all state in memory, and secrets need a managed key store.
 - **mTLS** on the host link, plus **hostd**: cancel, pre-fork, peer snapshot pull, inventory rebuild on restart, and buffering results across reconnects.

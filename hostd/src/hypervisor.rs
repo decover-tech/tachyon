@@ -66,11 +66,36 @@ pub struct GuestDisk {
     pub mount: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct GuestPrebuild {
     pub warm_commands: Vec<String>,
     pub keep_paths: Vec<String>,
     pub scrub_paths: Vec<String>,
+    /// Run in the workspace before the warm steps, with the clone token in
+    /// `$TACHYON_CLONE_TOKEN` for these commands only.
+    #[serde(default)]
+    pub clone_commands: Vec<String>,
+    /// Short-lived read-only clone token, base64. Secret: never logged,
+    /// never written to host disk, never in the warm steps' environment.
+    #[serde(default)]
+    pub clone_token_b64: String,
+    /// Key unchanged: the disk is a fork of the previous prebuild and only
+    /// new git objects are fetched.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+impl std::fmt::Debug for GuestPrebuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately omits the clone token.
+        f.debug_struct("GuestPrebuild")
+            .field("warm_commands", &self.warm_commands)
+            .field("keep_paths", &self.keep_paths)
+            .field("scrub_paths", &self.scrub_paths)
+            .field("clone_commands", &self.clone_commands.len())
+            .field("refresh", &self.refresh)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The guest agent's final report, sent before it powers the VM off.

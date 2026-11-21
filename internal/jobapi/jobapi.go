@@ -151,10 +151,13 @@ type Submission struct {
 // Hint is an early signal (push, pull request) that jobs for this commit are
 // likely coming, so the scheduler can pre-fork a job disk before `queued`.
 type Hint struct {
-	Tenant       string
-	Repo         string
-	Commit       string
-	Ref          string
+	Tenant string
+	Repo   string
+	Commit string
+	Ref    string
+	// Event is what produced the hint: "push" or "pull_request". Only
+	// pushes can trigger prebuilds.
+	Event        string
 	ChangedFiles []string
 	Trust        Trust
 	ReceivedAt   time.Time

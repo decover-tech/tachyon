@@ -167,6 +167,16 @@ message PrebuildBuild {
   repeated string scrub_paths = 4;
   // Egress allowlist while warm steps run; no repo secrets are present.
   repeated string egress_allowlist = 5;
+  // Run in the workspace before the warm steps, with clone_token in
+  // $TACHYON_CLONE_TOKEN. They fetch and check out the commit without
+  // writing the token to disk, and fail if .git/config holds credentials.
+  repeated string clone_commands = 6;
+  // Short-lived token that can only read this repo's contents. Secret:
+  // never log, never write to host disk, never expose to warm steps.
+  bytes clone_token = 7;
+  // The key is unchanged and the job disk forks the previous prebuild:
+  // only new git objects are fetched and warm_commands is empty.
+  bool refresh = 8;
 }
 
 // A job for this repo is likely coming; fork its disk now.

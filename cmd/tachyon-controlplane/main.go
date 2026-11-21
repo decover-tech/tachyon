@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
+	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/scheduler"
 )
 
@@ -35,6 +37,8 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	prebuildInterval := flag.Duration("prebuild-interval", 10*time.Minute, "minimum time between push-triggered prebuilds of one repo")
+	prebuildNightly := flag.Int("prebuild-nightly-hour", 3, "UTC hour after which each repo's nightly prebuild refresh runs")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -61,18 +65,32 @@ func main() {
 		}
 	}
 	secrets := &controlplane.MemSecrets{}
+	prebuilds := &controlplane.MemPrebuilds{}
 	core := &controlplane.Core{
 		Scheduler: scheduler.New(nil),
 		Images:    images,
-		Prebuilds: &controlplane.MemPrebuilds{},
+		Prebuilds: prebuilds,
 		Secrets:   secrets,
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
 		Log:       log,
 	}
+	ghClient := &github.Client{AppID: *appID, PrivateKey: key}
+	pbManager := &prebuild.Manager{
+		Source:      &github.PrebuildSource{Client: ghClient},
+		Images:      images,
+		Registry:    prebuilds,
+		Builder:     core,
+		Log:         log,
+		MinInterval: *prebuildInterval,
+		NightlyHour: *prebuildNightly,
+		// Warm steps reach only the git host and Tachyon's mirrors.
+		EgressAllowlist: egressHosts("github.com", *npmMirror, *goMirror, *registryMirror),
+	}
+	core.Prebuild = pbManager
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
-		API:           &github.Client{AppID: *appID, PrivateKey: key},
+		API:           ghClient,
 		Secrets:       secrets,
 		Log:           log,
 	}
@@ -104,6 +122,7 @@ func main() {
 			case <-t.C:
 				adapter.Reconcile(ctx)
 				core.RetryDeferred(ctx)
+				pbManager.Tick(ctx)
 			}
 		}
 	}()
@@ -124,4 +143,19 @@ func main() {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdown)
 	grpcSrv.GracefulStop()
+}
+
+// egressHosts returns the host of each non-empty URL (or bare host).
+func egressHosts(urls ...string) []string {
+	var out []string
+	for _, u := range urls {
+		if u == "" {
+			continue
+		}
+		if p, err := url.Parse(u); err == nil && p.Host != "" {
+			u = p.Host
+		}
+		out = append(out, u)
+	}
+	return out
 }
