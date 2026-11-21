@@ -207,6 +207,11 @@ func TestAdapterInfraRerunRetriesUntilAccepted(t *testing.T) {
 	h.api.err = &APIError{Status: http.StatusForbidden, Remaining: 4000, Body: "run not completed"}
 	h.a.Reconcile(ctx)
 	h.api.err = nil
+	h.a.Reconcile(ctx) // backing off: not retried on the very next pass
+	if len(h.api.reruns) != 0 {
+		t.Fatalf("reruns = %v, want none during backoff", h.api.reruns)
+	}
+	h.clock = h.clock.Add(rerunBackoffMin)
 	h.a.Reconcile(ctx)
 	if fmt.Sprint(h.api.reruns) != "[6]" {
 		t.Fatalf("reruns = %v, want [6]", h.api.reruns)
@@ -222,6 +227,46 @@ func TestAdapterInfraRerunRetriesUntilAccepted(t *testing.T) {
 	h.a.Reconcile(ctx)
 	if fmt.Sprint(h.api.reruns) != "[6]" {
 		t.Fatalf("reruns = %v: expired request was still sent", h.api.reruns)
+	}
+}
+
+// With the default RerunWindow and the controlplane's 30s Reconcile tick, a
+// run that stays incomplete for most of the window is still re-run once it
+// completes, and the refused requests are spaced out rather than sent every
+// tick.
+func TestAdapterInfraRerunWaitsForLongRunningRun(t *testing.T) {
+	h := newHarness(t)
+	h.a.RerunInfra = func(int64, string) bool { return true }
+	h.startJob(6, 1)
+	ctx := context.Background()
+	h.a.OnResult(ctx, jobapi.Result{JobID: "gh_6", Outcome: jobapi.OutcomeInfra})
+
+	refused := 0
+	h.api.err = &APIError{Status: http.StatusForbidden, Remaining: 4000, Body: "run not completed"}
+	for range 50 * 2 { // 50 minutes of 30s ticks
+		before := h.api.rerunCalls
+		h.a.Reconcile(ctx)
+		refused += h.api.rerunCalls - before
+		h.clock = h.clock.Add(30 * time.Second)
+	}
+	if refused == 0 || refused > 15 {
+		t.Fatalf("%d refused re-run requests in 50m, want a backed-off handful", refused)
+	}
+	h.api.err = nil
+	for range 2 * 5 { // the run completes; within one max backoff we re-run
+		h.a.Reconcile(ctx)
+		h.clock = h.clock.Add(30 * time.Second)
+	}
+	if fmt.Sprint(h.api.reruns) != "[6]" {
+		t.Fatalf("reruns = %v, want [6] after the run completed", h.api.reruns)
+	}
+}
+
+func TestRerunBackoff(t *testing.T) {
+	for n, want := range map[int]time.Duration{1: 30 * time.Second, 2: time.Minute, 3: 2 * time.Minute, 4: 4 * time.Minute, 5: 5 * time.Minute, 50: 5 * time.Minute} {
+		if got := rerunBackoff(n); got != want {
+			t.Errorf("rerunBackoff(%d) = %v, want %v", n, got, want)
+		}
 	}
 }
 

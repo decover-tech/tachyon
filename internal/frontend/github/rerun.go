@@ -10,8 +10,25 @@ import (
 // jobRefTTL is how long the adapter remembers a job waiting for its result.
 const jobRefTTL = 24 * time.Hour
 
-// maxRerunTries bounds failed (non-throttled) re-run requests for one job.
-const maxRerunTries = 10
+// Refused (non-throttled) re-run requests are retried with exponential
+// backoff from rerunBackoffMin up to rerunBackoffMax until RerunWindow runs
+// out. GitHub refuses a job re-run until the whole workflow run has
+// completed, which can take far longer than a few Reconcile ticks (it first
+// has to notice the lost runner, then wait for the run's other jobs), so the
+// number of tries is bounded by the window and the backoff, not a fixed count.
+const (
+	rerunBackoffMin = 30 * time.Second
+	rerunBackoffMax = 5 * time.Minute
+)
+
+// rerunBackoff is the wait after the n-th refused re-run request (n >= 1).
+func rerunBackoff(n int) time.Duration {
+	d := rerunBackoffMin
+	for i := 1; i < n && d < rerunBackoffMax; i++ {
+		d *= 2
+	}
+	return min(d, rerunBackoffMax)
+}
 
 // jobRef maps a spec job ID back to the GitHub job, so a result reported by
 // a host can be acted on.
@@ -28,6 +45,7 @@ type rerunReq struct {
 	ref         jobRef
 	requestedAt time.Time
 	tries       int
+	nextTry     time.Time // zero: try on the next pass
 }
 
 func (a *Adapter) maxInfraReruns() int {
@@ -93,7 +111,7 @@ func (a *Adapter) OnResult(_ context.Context, r jobapi.Result) {
 
 // requestReruns asks GitHub to re-run jobs recorded by OnResult. Throttled
 // requests wait for the next pass; other failures (typically "run not yet
-// completed") are retried until RerunWindow or maxRerunTries runs out.
+// completed") are retried with backoff until RerunWindow runs out.
 func (a *Adapter) requestReruns(ctx context.Context) {
 	b := a.budget()
 	a.mu.Lock()
@@ -108,6 +126,9 @@ func (a *Adapter) requestReruns(ctx context.Context) {
 	for i, rr := range reqs {
 		now := a.now()
 		ref := rr.ref
+		if now.Before(rr.nextTry) {
+			continue
+		}
 		if !b.Ready(ref.installationID, now) {
 			continue
 		}
@@ -121,7 +142,8 @@ func (a *Adapter) requestReruns(ctx context.Context) {
 		case IsThrottled(err):
 		default:
 			rr.tries++
-			if rr.tries >= maxRerunTries || now.Sub(rr.requestedAt) > a.rerunWindow() {
+			rr.nextTry = now.Add(rerunBackoff(rr.tries))
+			if rr.nextTry.Sub(rr.requestedAt) > a.rerunWindow() {
 				a.log().Error("giving up re-running job", "job", ids[i], "repo", ref.repo, "tries", rr.tries, "err", err)
 				done = true
 			}

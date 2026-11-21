@@ -25,6 +25,8 @@ type fakeAPI struct {
 	reruns  []int64 // GitHub job IDs
 	calls   int
 
+	rerunCalls int // RerunJob calls, failed or not
+
 	// err, if set, is returned by every call (and counted in calls).
 	err error
 }
@@ -46,6 +48,7 @@ func (f *fakeAPI) RunContext(context.Context, int64, string, int64) (RunContext,
 func (f *fakeAPI) RerunJob(_ context.Context, _ int64, _ string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.rerunCalls++
 	if err := f.fail(); err != nil {
 		return err
 	}
