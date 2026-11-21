@@ -402,6 +402,68 @@ mod tests {
         assert!(!format!("{p:?}").contains(&p.runner_config_b64));
     }
 
+    // Golden files shared with the guest agent (internal/guest), so a field
+    // renamed on either side fails a test.
+    #[test]
+    fn payload_matches_guest_wire_format() {
+        let mut p = GuestPayload {
+            job_id: "job-1".into(),
+            env: [
+                ("TACHYON_JOB_ID", "job-1"),
+                ("TACHYON_PREBUILD_MATCH", "full"),
+                ("TACHYON_WARM_PATHS", "node_modules:vendor/cache"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect(),
+            files: [
+                (
+                    "/etc/apt/apt.conf.d/01tachyon-proxy",
+                    "QWNxdWlyZTo6aHR0cDo6UHJveHkgImh0dHA6Ly9taXJyb3I6MzE0MiI7Cg==",
+                ),
+                ("~/.m2/settings.xml", "PHNldHRpbmdzLz4K"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect(),
+            disks: vec![
+                GuestDisk {
+                    serial: "job".into(),
+                    mount: "/".into(),
+                },
+                GuestDisk {
+                    serial: "sticky-docker".into(),
+                    mount: "/var/lib/docker".into(),
+                },
+            ],
+            prebuild: Some(GuestPrebuild {
+                warm_commands: vec!["npm ci".into(), "go mod download".into()],
+                keep_paths: vec!["node_modules".into(), "~/.npm".into()],
+                scrub_paths: vec![".npmrc".into(), ".docker/config.json".into()],
+            }),
+            ..Default::default()
+        };
+        p.set_runner_config(br#"{"jit":"not-a-real-config"}"#);
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../../internal/guest/testdata/payload.json"))
+                .unwrap();
+        assert_eq!(serde_json::to_value(&p).unwrap(), golden);
+    }
+
+    #[test]
+    fn result_matches_guest_wire_format() {
+        let r: GuestResult =
+            serde_json::from_str(include_str!("../../internal/guest/testdata/result.json"))
+                .unwrap();
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.phases["runner_online"], "2026-11-21T10:00:00Z");
+        assert_eq!(r.phases["job_started"], "2026-11-21T10:00:01Z");
+        assert_eq!(r.secret_scan_clean, Some(true));
+        // A job's result omits the scan.
+        let r: GuestResult = serde_json::from_str(r#"{"exit_code":3,"phases":{}}"#).unwrap();
+        assert_eq!(r.secret_scan_clean, None);
+    }
+
     #[test]
     fn cgroup_usage() {
         let tmp = tempfile::tempdir().unwrap();

@@ -1,0 +1,22 @@
+{
+  "job_id": "job-1",
+  "runner_config_b64": "eyJqaXQiOiJub3QtYS1yZWFsLWNvbmZpZyJ9",
+  "env": {
+    "TACHYON_JOB_ID": "job-1",
+    "TACHYON_PREBUILD_MATCH": "full",
+    "TACHYON_WARM_PATHS": "node_modules:vendor/cache"
+  },
+  "files": {
+    "/etc/apt/apt.conf.d/01tachyon-proxy": "QWNxdWlyZTo6aHR0cDo6UHJveHkgImh0dHA6Ly9taXJyb3I6MzE0MiI7Cg==",
+    "~/.m2/settings.xml": "PHNldHRpbmdzLz4K"
+  },
+  "disks": [
+    {"serial": "job", "mount": "/"},
+    {"serial": "sticky-docker", "mount": "/var/lib/docker"}
+  ],
+  "prebuild": {
+    "warm_commands": ["npm ci", "go mod download"],
+    "keep_paths": ["node_modules", "~/.npm"],
+    "scrub_paths": [".npmrc", ".docker/config.json"]
+  }
+}
