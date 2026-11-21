@@ -197,3 +197,131 @@ func TestStorePrebuilds(t *testing.T) {
 		t.Fatalf("not-found reported as errors: %v", errs)
 	}
 }
+
+// hookStore runs onPut while a job write is in flight, before it lands.
+type hookStore struct {
+	store.Store
+	onPut func(store.Job)
+}
+
+func (s *hookStore) PutJob(ctx context.Context, j store.Job) error {
+	if s.onPut != nil {
+		s.onPut(j)
+	}
+	return s.Store.PutJob(ctx, j)
+}
+
+func openJob(t *testing.T, st store.Store, id string) store.Job {
+	t.Helper()
+	jobs, err := st.OpenJobs(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range jobs {
+		if j.ID == id {
+			return j
+		}
+	}
+	t.Fatalf("job %s not open", id)
+	return store.Job{}
+}
+
+// A deferred job is persisted as deferred before RetryDeferred can see it,
+// so a retry that places it is never overwritten by the late write.
+func TestDeferredWriteDoesNotOverwriteAssigned(t *testing.T) {
+	ctx := context.Background()
+	st := &hookStore{Store: &store.Mem{}}
+	e := newEnv()
+	e.core.Store = st
+	h1 := e.connect(t, "h1", "us", 4, 16)
+	h1.push(t, heartbeat(false))
+	if err := e.core.Submit(ctx, e.submission(t, "j1", 4)); err != nil {
+		t.Fatal(err)
+	}
+	if h1.next(t).GetAssign().GetJobId() != "j1" {
+		t.Fatal("j1 not assigned")
+	}
+
+	// While j2's deferred write is in flight, j1 finishes and the retry
+	// loop runs, as the ticker goroutine could.
+	fired := false
+	st.onPut = func(j store.Job) {
+		if j.ID != "j2" || j.State != store.JobDeferred || fired {
+			return
+		}
+		fired = true
+		e.core.Scheduler.Release("j1", nil)
+		e.core.RetryDeferred(ctx)
+	}
+	j2 := e.submission(t, "j2", 2)
+	j2.Deferrable = true
+	if err := e.core.Submit(ctx, j2); err != nil {
+		t.Fatal(err)
+	}
+	if !fired {
+		t.Fatal("j2 not deferred")
+	}
+	e.core.RetryDeferred(ctx)
+	if h1.next(t).GetAssign().GetJobId() != "j2" {
+		t.Fatal("j2 not assigned")
+	}
+	h1.none(t)
+	if j := openJob(t, st, "j2"); j.State != store.JobAssigned || j.HostID != "h1" {
+		t.Fatalf("j2 persisted as %q on %q", j.State, j.HostID)
+	}
+}
+
+// Re-submitting a job that is running or deferred (the frontend's
+// reconcile does this) leaves it and its persisted row alone, including
+// after a restart restored its reservation.
+func TestDuplicateSubmitKeepsJob(t *testing.T) {
+	ctx := context.Background()
+	st := &store.Mem{}
+	e := newEnv()
+	e.core.Store = st
+	h1 := e.connect(t, "h1", "us", 4, 16)
+	h1.push(t, heartbeat(false))
+	j1 := e.submission(t, "j1", 4)
+	if err := e.core.Submit(ctx, j1); err != nil {
+		t.Fatal(err)
+	}
+	if h1.next(t).GetAssign().GetJobId() != "j1" {
+		t.Fatal("j1 not assigned")
+	}
+	j2 := e.submission(t, "j2", 2)
+	j2.Deferrable = true
+	for range 2 {
+		if err := e.core.Submit(ctx, j1); err != nil {
+			t.Fatalf("duplicate j1: %v", err)
+		}
+		if err := e.core.Submit(ctx, j2); err != nil {
+			t.Fatalf("j2: %v", err)
+		}
+	}
+	h1.none(t)
+	if j := openJob(t, st, "j1"); j.State != store.JobAssigned || j.HostID != "h1" || j.CPU != 4 {
+		t.Fatalf("j1 persisted as %+v", j)
+	}
+	e.core.mu.Lock()
+	n := len(e.core.deferred)
+	e.core.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("deferred queue has %d entries, want 1", n)
+	}
+
+	// After a restart, the restored j1 is re-submitted before its host
+	// reconnects.
+	e2 := e.restarted(st)
+	if _, err := e2.core.Restore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := e2.core.Submit(ctx, e2.submission(t, "j1", 4)); err != nil {
+		t.Fatalf("duplicate j1 after restart: %v", err)
+	}
+	if j := openJob(t, st, "j1"); j.State != store.JobAssigned || j.HostID != "h1" {
+		t.Fatalf("j1 after restart persisted as %+v", j)
+	}
+	if !e2.core.Scheduler.Placed("j1") {
+		t.Fatal("j1 reservation lost")
+	}
+}

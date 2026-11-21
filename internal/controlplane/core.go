@@ -64,6 +64,9 @@ type Core struct {
 	hints    map[string]hintEntry // repo@commit -> changed files
 	deferred []jobapi.Submission
 	records  map[string]*telemetry.Record
+	// inflight holds the IDs of jobs a Submit call is working on, so a
+	// duplicate submission of the same ID can't race it.
+	inflight map[string]bool
 }
 
 type hintEntry struct {
@@ -94,6 +97,7 @@ func (c *Core) init() {
 		c.hosts = map[string]*hostConn{}
 		c.hints = map[string]hintEntry{}
 		c.records = map[string]*telemetry.Record{}
+		c.inflight = map[string]bool{}
 	}
 }
 
@@ -145,11 +149,29 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 
 	c.mu.Lock()
 	c.init()
+	// A job ID that is already being submitted, waiting in the deferred
+	// queue or holding a reservation is a duplicate (the frontend's
+	// reconcile re-dispatches jobs that look stuck). Submitting it again
+	// would overwrite the persisted row of a job that may be running.
+	if c.inflight[spec.JobID] || c.deferredLocked(spec.JobID) || c.Scheduler.Placed(spec.JobID) {
+		c.mu.Unlock()
+		c.log().Info("duplicate submit ignored", "job", spec.JobID)
+		return nil
+	}
+	c.inflight[spec.JobID] = true
 	if len(sub.ChangedFiles) == 0 {
 		sub.ChangedFiles = c.hints[spec.Repo+"@"+spec.Commit].changed
 	}
 	c.records[spec.JobID] = rec
 	c.mu.Unlock()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			c.mu.Lock()
+			delete(c.inflight, spec.JobID)
+			c.mu.Unlock()
+		}
+	}()
 	// A job that can't be recorded is refused, so the frontend retries it
 	// rather than it being lost in a restart.
 	if err := c.saveJob(ctx, sub, store.JobQueued, nil); err != nil {
@@ -160,10 +182,18 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	a, err := c.Scheduler.Place(sub)
 	switch {
 	case errors.Is(err, scheduler.ErrDeferred):
+		// Persist before queueing: once the job is in c.deferred,
+		// RetryDeferred may place it, and a late "deferred" write would
+		// overwrite its "assigned" row.
+		c.noteJob(ctx, sub, store.JobDeferred, nil)
 		c.mu.Lock()
+		delete(c.inflight, spec.JobID)
 		c.deferred = append(c.deferred, sub)
 		c.mu.Unlock()
-		c.noteJob(ctx, sub, store.JobDeferred, nil)
+		handedOff = true
+		return nil
+	case errors.Is(err, scheduler.ErrAlreadyPlaced):
+		// Placed by a path outside Submit; its row is not ours to change.
 		return nil
 	case errors.Is(err, scheduler.ErrNoCapacity):
 		rec.Burst = true
@@ -201,6 +231,17 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	c.noteJob(ctx, sub, store.JobAssigned, &a)
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
 	return nil
+}
+
+// deferredLocked reports whether jobID waits in the deferred queue. c.mu
+// must be held.
+func (c *Core) deferredLocked(jobID string) bool {
+	for _, d := range c.deferred {
+		if d.Spec.JobID == jobID {
+			return true
+		}
+	}
+	return false
 }
 
 // RetryDeferred re-submits deferred jobs; call it periodically.
