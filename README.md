@@ -13,7 +13,8 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `proto/tachyon/hostlink/v1/` | protobuf | The only contract between hostd and the control plane. hostd dials out and holds one bidirectional stream |
 | `hostd/` | Rust | `tachyon-hostd`: warm VM pool, copy-on-write job disks (ZFS), per-VM jailer, Cloud Hypervisor control, sticky-volume promotion, prebuild snapshots |
 | `cmd/tachyon-controlplane/` | Go | Serves GitHub webhooks (HTTP) and the host link (gRPC). In-memory state for now |
-| `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key` |
+| `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key`, `tachyon hostcert` |
+| `internal/hostauth/` | Go | Hostlink mTLS: server TLS config, host identity from client certificates, development certificate issuance |
 | `internal/jobapi/` | Go | Platform-neutral job spec. Nothing below it knows about GitHub |
 | `internal/frontend/github/` | Go | GitHub Actions adapter: labels, trust derivation, webhook verification, repo-scoped JIT runners, reconcile loop, minimal App REST client |
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
@@ -59,10 +60,11 @@ hostd compiles on macOS for tests, but only runs on Linux with KVM, ZFS and Clou
 ```sh
 TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
   -github-app-id 123 -github-app-key app.pem \
-  -image ubuntu-24.04=2026-11-16
+  -image ubuntu-24.04=2026-11-16 \
+  -hostlink-cert cp.crt -hostlink-key cp.key -hostlink-client-ca hostlink-ca.crt
 ```
 
-Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090`.
+Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090` over mutual TLS, and each host must present a certificate for its own `TACHYON_HOST_ID`. `tachyon hostcert` issues development certificates; issuance and rotation are in [docs/hostlink-mtls.md](docs/hostlink-mtls.md). Pass `-hostlink-insecure` (and `TACHYON_HOSTLINK_INSECURE=1` to hostd) to run without TLS locally.
 
 ### Running hostd (Linux host)
 
@@ -70,7 +72,9 @@ Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9
 | --- | --- | --- |
 | `TACHYON_HOST_ID`, `TACHYON_REGION` | yes | |
 | `TACHYON_VCPU`, `TACHYON_MEMORY_GB` | yes | |
-| `TACHYON_CONTROL_PLANE` | yes | e.g. `http://cp.internal:9090` |
+| `TACHYON_CONTROL_PLANE` | yes | e.g. `https://cp.internal:9090` |
+| `TACHYON_TLS_CERT`, `TACHYON_TLS_KEY`, `TACHYON_TLS_CA` | yes, unless `TACHYON_HOSTLINK_INSECURE=1` | host client cert/key and the control plane's CA; see [docs/hostlink-mtls.md](docs/hostlink-mtls.md) |
+| `TACHYON_TLS_SERVER_NAME` | no | host from `TACHYON_CONTROL_PLANE` |
 | `TACHYON_ZFS_POOL` | yes | e.g. `tank/tachyon` |
 | `TACHYON_BASE_SNAPSHOTS` | yes | dir with one Cloud Hypervisor snapshot per VM size: `<dir>/<vcpu>/` |
 | `TACHYON_WARM` | no | `2:2,4:2,8:1` (vcpu:paused VMs) |
@@ -89,7 +93,8 @@ Not built yet:
 - **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
 - **Persistence.** The control plane keeps all state in memory, and secrets need a managed key store.
-- **mTLS** on the host link, plus **hostd**: cancel, pre-fork, peer snapshot pull, inventory rebuild on restart, and buffering results across reconnects.
+- **Host certificate issuer** backed by the key store, and on-host renewal. mTLS and host identity checks on the host link are built; only the `tachyon hostcert` development issuer exists.
+- **hostd**: cancel, pre-fork, peer snapshot pull, inventory rebuild on restart, and buffering results across reconnects.
 - **Observability export** (OpenTelemetry/Prometheus/ClickHouse) and billing.
 
 Open decisions D2 to D6 and the open questions are listed at the end of the [design doc](docs/architecture.md#risks-open-questions-and-decisions).

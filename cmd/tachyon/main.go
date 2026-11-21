@@ -2,6 +2,7 @@
 //
 //	tachyon prebuild validate [repo-dir]
 //	tachyon prebuild key -image ubuntu-24.04@2026-11-16 [repo-dir]
+//	tachyon hostcert ca|host|server ...   (see hostcert.go)
 package main
 
 import (
@@ -15,12 +16,23 @@ import (
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   tachyon prebuild validate [repo-dir]
-  tachyon prebuild key -image <name@version> [repo-dir]`)
+  tachyon prebuild key -image <name@version> [repo-dir]
+  tachyon hostcert ca -out <prefix> [-ttl 8760h]
+  tachyon hostcert host -ca <prefix> -id <host_id> -out <prefix> [-ttl 720h] [-trust-domain tachyon]
+  tachyon hostcert server -ca <prefix> -name <dns-or-ip>[,...] -out <prefix> [-ttl 2160h]`)
 	os.Exit(2)
 }
 
 func main() {
-	if len(os.Args) < 3 || os.Args[1] != "prebuild" {
+	if len(os.Args) < 3 {
+		usage()
+	}
+	switch os.Args[1] {
+	case "prebuild":
+	case "hostcert":
+		hostcert(os.Args[2], os.Args[3:])
+		return
+	default:
 		usage()
 	}
 	switch os.Args[2] {

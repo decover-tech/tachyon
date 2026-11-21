@@ -53,6 +53,9 @@ pub struct Link<H: Hypervisor + 'static, S: Storage + 'static> {
     pub control_plane: String,
     pub inventory: Arc<Inventory>,
     pub draining: Arc<AtomicBool>,
+    /// mTLS credentials, re-read on every connect; None only in insecure
+    /// development mode.
+    pub tls: Option<crate::tls::TlsFiles>,
     running: Arc<Mutex<HashMap<String, ()>>>,
 }
 
@@ -67,6 +70,7 @@ where
             control_plane,
             inventory: Arc::default(),
             draining: Arc::default(),
+            tls: None,
             running: Arc::default(),
         }
     }
@@ -85,7 +89,10 @@ where
     }
 
     async fn session(&self) -> Result<()> {
-        let mut client = HostLinkServiceClient::connect(self.control_plane.clone()).await?;
+        let channel = crate::tls::endpoint(&self.control_plane, self.tls.as_ref())?
+            .connect()
+            .await?;
+        let mut client = HostLinkServiceClient::new(channel);
         let (tx, rx) = mpsc::channel::<pb::LinkRequest>(256);
         let running: Vec<String> = self.running.lock().unwrap().keys().cloned().collect();
         tx.send(msg(pb::link_request::Msg::Hello(pb::Hello {
