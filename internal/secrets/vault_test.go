@@ -30,6 +30,8 @@ type fakeKV struct {
 	requests []string
 	bodies   []string
 	fail     map[string]int // "METHOD kind" -> status to return
+
+	deletionTime string // if set, overrides deletion_time on reads
 }
 
 func newFakeKV(t *testing.T, now func() time.Time) (*fakeKV, *httptest.Server) {
@@ -116,9 +118,18 @@ func (f *fakeKV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte(`{"errors":[]}`))
 			return
 		}
+		// Like real KV v2, a live version carries a future deletion_time
+		// when delete_version_after is set.
+		deletion := ""
+		if ttl := f.meta[key]; ttl > 0 {
+			deletion = f.written[key].Add(ttl).UTC().Format(time.RFC3339Nano)
+		}
+		if f.deletionTime != "" {
+			deletion = f.deletionTime
+		}
 		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{
 			"data":     v,
-			"metadata": map[string]any{"version": 1, "deletion_time": "", "destroyed": false},
+			"metadata": map[string]any{"version": 1, "deletion_time": deletion, "destroyed": false},
 		}})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -167,6 +178,37 @@ func TestVaultServerSideExpiry(t *testing.T) {
 	c.advance(DefaultJITTTL)
 	if _, err := v.Get(context.Background(), ref); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestVaultDeletionTime(t *testing.T) {
+	c := &clock{t: time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)}
+	f, srv := newFakeKV(t, c.now)
+	v := &Vault{Addr: srv.URL, Mount: "kv", Token: Redacted(f.token), Now: c.now}
+	ctx := context.Background()
+	ref, err := v.Put(ctx, "jit/r", []byte("v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A live version with a future deletion_time, as real Vault returns it,
+	// resolves.
+	if got, err := v.Get(ctx, ref); err != nil || string(got) != "v" {
+		t.Fatalf("live value: got %q, err %v", got, err)
+	}
+	// A deletion_time in the past means the version was deleted, even if the
+	// server still answers 200 with data.
+	f.mu.Lock()
+	f.deletionTime = c.now().Add(-time.Second).Format(time.RFC3339Nano)
+	f.mu.Unlock()
+	if _, err := v.Get(ctx, ref); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("past deletion_time: err = %v", err)
+	}
+	// An unparseable deletion_time fails closed.
+	f.mu.Lock()
+	f.deletionTime = "not-a-time"
+	f.mu.Unlock()
+	if _, err := v.Get(ctx, ref); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("bad deletion_time: err = %v", err)
 	}
 }
 

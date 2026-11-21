@@ -150,7 +150,7 @@ func (v *Vault) Get(ctx context.Context, ref string) ([]byte, error) {
 		return nil, fmt.Errorf("resolve %s: malformed key store response", ref)
 	}
 	d := resp.Data
-	if d.Data == nil || d.Metadata.Destroyed || d.Metadata.DeletionTime != "" {
+	if d.Data == nil || d.Metadata.Destroyed || v.deleted(d.Metadata.DeletionTime) {
 		return nil, fmt.Errorf("%s: %w", ref, ErrNotFound)
 	}
 	if d.Data.ExpiresAt.IsZero() || !v.now().Before(d.Data.ExpiresAt) {
@@ -162,6 +162,21 @@ func (v *Vault) Get(ctx context.Context, ref string) ([]byte, error) {
 		return nil, fmt.Errorf("resolve %s: malformed key store value", ref)
 	}
 	return val, nil
+}
+
+// deleted reports whether a version's deletion_time has passed. KV v2 sets
+// deletion_time on every live version when delete_version_after is set, to
+// the future time at which the server will delete it, so a non-empty value
+// alone does not mean the version is gone.
+func (v *Vault) deleted(deletionTime string) bool {
+	if deletionTime == "" {
+		return false
+	}
+	t, err := time.Parse(time.RFC3339Nano, deletionTime)
+	if err != nil {
+		return true // unreadable: fail closed
+	}
+	return !v.now().Before(t)
 }
 
 func (v *Vault) Delete(ctx context.Context, ref string) error {
