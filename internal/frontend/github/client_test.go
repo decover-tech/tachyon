@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -86,7 +87,14 @@ func TestClientEndpoints(t *testing.T) {
 			t.Errorf("token request auth = %q", r.Header.Get("Authorization"))
 		}
 		tokenCalls.Add(1)
-		json.NewEncoder(w).Encode(map[string]any{"token": "inst-tok", "expires_at": time.Now().Add(time.Hour)})
+		var body struct {
+			Permissions map[string]string `json:"permissions"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		if !maps.Equal(body.Permissions, AppPermissions) {
+			t.Errorf("token requested permissions %v, want %v", body.Permissions, AppPermissions)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"token": "inst-tok", "expires_at": time.Now().Add(time.Hour), "permissions": body.Permissions})
 	})
 	checkAuth := func(r *http.Request) {
 		if r.Header.Get("Authorization") != "token inst-tok" {
@@ -130,7 +138,7 @@ func TestClientEndpoints(t *testing.T) {
 	mux.HandleFunc("GET /repos/acme/api/actions/runners", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"runners":[{"id":1,"name":"tachyon-a","busy":true}]}`))
 	})
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(enforceLeastPrivilege(t, mux))
 	defer srv.Close()
 
 	c := &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL}

@@ -35,6 +35,7 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	allowedOwners := flag.String("github-allowed-owners", "", "comma-separated GitHub orgs/users whose repos get runners (empty: any installation)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -75,6 +76,11 @@ func main() {
 		API:           &github.Client{AppID: *appID, PrivateKey: key},
 		Secrets:       secrets,
 		Log:           log,
+	}
+	for _, o := range strings.Split(*allowedOwners, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			adapter.AllowedOwners = append(adapter.AllowedOwners, o)
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

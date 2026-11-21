@@ -13,7 +13,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `proto/tachyon/hostlink/v1/` | protobuf | The only contract between hostd and the control plane. hostd dials out and holds one bidirectional stream |
 | `hostd/` | Rust | `tachyon-hostd`: warm VM pool, copy-on-write job disks (ZFS), per-VM jailer, Cloud Hypervisor control, sticky-volume promotion, prebuild snapshots |
 | `cmd/tachyon-controlplane/` | Go | Serves GitHub webhooks (HTTP) and the host link (gRPC). In-memory state for now |
-| `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key` |
+| `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key`, `tachyon github-app manifest` |
 | `internal/jobapi/` | Go | Platform-neutral job spec. Nothing below it knows about GitHub |
 | `internal/frontend/github/` | Go | GitHub Actions adapter: labels, trust derivation, webhook verification, repo-scoped JIT runners, reconcile loop, minimal App REST client |
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
@@ -62,7 +62,9 @@ TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
   -image ubuntu-24.04=2026-11-16
 ```
 
-Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090`.
+Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090`. `-github-allowed-owners org-a,org-b` limits runners to pilot orgs.
+
+Registering the GitHub App (least-privilege permissions, from a generated manifest) and the pilot-org installation flow are in [docs/github-app.md](docs/github-app.md).
 
 ### Running hostd (Linux host)
 
