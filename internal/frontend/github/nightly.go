@@ -36,7 +36,9 @@ type CheckRun struct {
 const CheckRunName = "Tachyon nightly clean run"
 
 // DefaultNightlyExclude skips workflows whose names suggest side effects: a
-// re-run repeats every job of the run, including ones that ship things.
+// re-run repeats every job of the run, including ones that ship things. It
+// is a backstop only; a name says nothing about the jobs inside, which is
+// why repos must opt in (Nightly.Repos).
 var DefaultNightlyExclude = regexp.MustCompile(`(?i)deploy|release|publish|rollout|promote`).MatchString
 
 // Nightly runs one clean run per repo per night. It picks the repo's latest
@@ -47,8 +49,16 @@ var DefaultNightlyExclude = regexp.MustCompile(`(?i)deploy|release|publish|rollo
 //
 // Re-running the same commit keeps the comparison honest: the only
 // difference between the two attempts is the prebuild.
+//
+// A re-run repeats every job of the workflow run, Tachyon or not, including
+// any deploy job. So it is opt-in per repo (Repos), and only a run for the
+// newest commit seen on the default branch is ever re-run: re-running an
+// older commit's run could ship that commit over a newer one.
 type Nightly struct {
 	API NightlyAPI
+	// Repos reports whether a repo (owner/name) opted in to the nightly
+	// clean run. nil means no repo did, and nothing is ever re-run.
+	Repos func(repo string) bool
 	// Hour (UTC, 0-23) after which each repo's clean run may start.
 	Hour int
 	// PrebuildMatch returns how a job (job API ID) used its prebuild. Jobs
@@ -126,6 +136,10 @@ func (n *Nightly) excluded(workflow string) bool {
 	return DefaultNightlyExclude(workflow)
 }
 
+func (n *Nightly) enabled(repo string) bool {
+	return n.Repos != nil && n.Repos(repo)
+}
+
 func (n *Nightly) repo(name string, inst int64) *nightlyRepo {
 	if n.repos == nil {
 		n.repos = map[string]*nightlyRepo{}
@@ -150,6 +164,9 @@ func (n *Nightly) queued(e workflowJobEvent, rc RunContext, trust jobapi.Trust, 
 	attempt := j.RunAttempt
 	if attempt == 0 {
 		attempt = 1
+	}
+	if !n.enabled(e.Repository.FullName) {
+		return false
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -368,11 +385,30 @@ func (n *Nightly) cleanDone(r *nightlyRepo, now time.Time) bool {
 	return true
 }
 
-// candidate picks the most recent finished run that used a prebuild.
+// candidate picks the most recent finished run that used a prebuild, among
+// the runs for the newest commit seen on the default branch. It never picks
+// an older commit's run: its jobs may deploy, and re-running them would roll
+// the newer commit back. While any run for the newest commit is unfinished
+// it picks nothing, so the next tick tries again.
 func (n *Nightly) candidate(r *nightlyRepo, now time.Time) *nightlyRun {
+	var newest *nightlyRun
+	for _, run := range r.runs {
+		if newest == nil || run.started.After(newest.started) {
+			newest = run
+		}
+	}
+	if newest == nil {
+		return nil
+	}
 	var runs []*nightlyRun
 	for _, run := range r.runs {
-		if n.finished(run, now) && usedPrebuild(run) {
+		if run.commit != newest.commit {
+			continue
+		}
+		if !n.finished(run, now) {
+			return nil
+		}
+		if usedPrebuild(run) {
 			runs = append(runs, run)
 		}
 	}

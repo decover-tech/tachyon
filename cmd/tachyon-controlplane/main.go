@@ -36,7 +36,8 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
-	nightlyHour := flag.Int("nightly-hour", 3, "UTC hour after which each repo's nightly clean run starts; -1 disables it (it needs the App's actions:write and checks:write permissions)")
+	nightlyHour := flag.Int("nightly-hour", 3, "UTC hour after which each opted-in repo's nightly clean run starts; -1 disables it")
+	nightlyRepos := flag.String("nightly-repos", "", "comma-separated owner/name repos opted in to the nightly clean run, which re-runs every job of a default-branch workflow run (deploy jobs too) and needs the App's actions:write and checks:write permissions; empty disables it")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -79,10 +80,17 @@ func main() {
 		Secrets:       secrets,
 		Log:           log,
 	}
-	if *nightlyHour >= 0 && *nightlyHour < 24 {
+	optedIn := map[string]bool{}
+	for _, r := range strings.Split(*nightlyRepos, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			optedIn[strings.ToLower(r)] = true
+		}
+	}
+	if *nightlyHour >= 0 && *nightlyHour < 24 && len(optedIn) > 0 {
 		adapter.Nightly = &github.Nightly{
-			API:  client,
-			Hour: *nightlyHour,
+			API:   client,
+			Hour:  *nightlyHour,
+			Repos: func(repo string) bool { return optedIn[strings.ToLower(repo)] },
 			PrebuildMatch: func(jobID string) prebuild.Match {
 				if rec := core.Record(jobID); rec != nil {
 					return prebuild.Match(rec.PrebuildMatch)

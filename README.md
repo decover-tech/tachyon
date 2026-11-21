@@ -64,7 +64,7 @@ TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
 
 Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090`.
 
-Each night after `-nightly-hour` (UTC, default 3; `-1` disables it) the control plane re-runs each repo's latest default-branch run without a prebuild and reports divergence as a `Tachyon nightly clean run` check on the commit. This needs the App's Actions (write) and Checks (write) permissions.
+The nightly clean run is off unless repos opt in with `-nightly-repos owner/name,...`. Each night after `-nightly-hour` (UTC, default 3; `-1` disables it) the control plane re-runs each opted-in repo's default-branch run for its newest commit without a prebuild and reports divergence as a `Tachyon nightly clean run` check on the commit. The re-run repeats every job of that workflow run, non-Tachyon and deploy jobs included, so opt in only repos where that is safe. This needs the App's Actions (write) and Checks (write) permissions.
 
 ### Running hostd (Linux host)
 

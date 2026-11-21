@@ -53,9 +53,88 @@ func newNightlyHarness(t *testing.T) *nightlyHarness {
 	h.a.Nightly = &Nightly{
 		API:           h.napi,
 		Hour:          3,
+		Repos:         func(repo string) bool { return repo == "acme/api" },
 		PrebuildMatch: func(id string) prebuild.Match { return h.matches[id] },
 	}
 	return h
+}
+
+// commitJobs is runJobs for a run on a given commit.
+func (h *nightlyHarness) commitJobs(runID int64, sha string, jobs map[int64][2]string) {
+	h.t.Helper()
+	for id, nc := range jobs {
+		e := nightlyEvent("queued", id, runID, 1, "CI", nc[0], "")
+		e["workflow_job"].(map[string]any)["head_sha"] = sha
+		h.post("workflow_job", e, testSecret)
+	}
+	for id, nc := range jobs {
+		e := nightlyEvent("completed", id, runID, 1, "CI", nc[0], nc[1])
+		e["workflow_job"].(map[string]any)["head_sha"] = sha
+		h.post("workflow_job", e, testSecret)
+	}
+}
+
+func TestNightlyIsOptInPerRepo(t *testing.T) {
+	for name, repos := range map[string]func(string) bool{
+		"no repos":        nil,
+		"other repo only": func(r string) bool { return r == "acme/web" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newNightlyHarness(t)
+			h.a.Nightly.Repos = repos
+			h.matches["gh_1"] = prebuild.MatchFull
+			h.runJobs(77, 1, "CI", map[int64][2]string{1: {"test", "success"}})
+			h.clock = time.Date(2026, 11, 21, 4, 0, 0, 0, time.UTC)
+			h.a.Reconcile(context.Background())
+			if len(h.napi.reruns) != 0 {
+				t.Fatalf("re-ran a repo that did not opt in: %v", h.napi.reruns)
+			}
+		})
+	}
+}
+
+// At the nightly hour the run for the newest commit B is still going. The
+// finished run for the older commit A must not be re-run: its deploy job
+// would ship A over B.
+func TestNightlyNeverRerunsAnOlderCommit(t *testing.T) {
+	h := newNightlyHarness(t)
+	h.matches["gh_1"], h.matches["gh_2"] = prebuild.MatchFull, prebuild.MatchFull
+	h.commitJobs(70, "aaaaaaa", map[int64][2]string{1: {"test", "success"}})
+
+	h.clock = time.Date(2026, 11, 21, 2, 55, 0, 0, time.UTC)
+	e := nightlyEvent("queued", 2, 71, 1, "CI", "test", "")
+	e["workflow_job"].(map[string]any)["head_sha"] = "bbbbbbb"
+	h.post("workflow_job", e, testSecret)
+
+	h.clock = time.Date(2026, 11, 21, 3, 0, 0, 0, time.UTC)
+	h.a.Reconcile(context.Background())
+	if len(h.napi.reruns) != 0 {
+		t.Fatalf("re-ran an older commit's run while the newest was in progress: %v", h.napi.reruns)
+	}
+
+	e = nightlyEvent("completed", 2, 71, 1, "CI", "test", "success")
+	e["workflow_job"].(map[string]any)["head_sha"] = "bbbbbbb"
+	h.post("workflow_job", e, testSecret)
+	h.clock = h.clock.Add(20 * time.Minute)
+	h.a.Reconcile(context.Background())
+	if len(h.napi.reruns) != 1 || h.napi.reruns[0] != 71 {
+		t.Fatalf("reruns = %v, want [71]", h.napi.reruns)
+	}
+}
+
+// When the newest commit's run did not use a prebuild, nothing is re-run,
+// not an older commit's run that did.
+func TestNightlyNoFallbackToOlderCommit(t *testing.T) {
+	h := newNightlyHarness(t)
+	h.matches["gh_1"], h.matches["gh_2"] = prebuild.MatchFull, prebuild.MatchNone
+	h.commitJobs(70, "aaaaaaa", map[int64][2]string{1: {"test", "success"}})
+	h.clock = h.clock.Add(time.Hour)
+	h.commitJobs(71, "bbbbbbb", map[int64][2]string{2: {"test", "success"}})
+	h.clock = time.Date(2026, 11, 21, 3, 0, 0, 0, time.UTC)
+	h.a.Reconcile(context.Background())
+	if len(h.napi.reruns) != 0 {
+		t.Fatalf("fell back to an older commit: %v", h.napi.reruns)
+	}
 }
 
 func nightlyEvent(action string, id, runID int64, attempt int, workflow, name, conclusion string) map[string]any {
