@@ -182,6 +182,9 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 	}
 	c.Scheduler.Release(r.GetJobId(), usage)
 	if pb := r.GetPrebuild(); pb != nil && pb.GetKey() != "" {
+		if rec := c.Record(r.GetJobId()); rec != nil {
+			rec.MarkPrebuildBuild()
+		}
 		c.Prebuilds.Register(prebuild.Snapshot{
 			Repo:      pb.GetRepo(),
 			Key:       pb.GetKey(),

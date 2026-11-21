@@ -306,3 +306,14 @@ func (c *Core) Record(jobID string) *telemetry.Record {
 	defer c.mu.Unlock()
 	return c.records[jobID]
 }
+
+// Records returns every job's telemetry record, in no particular order.
+func (c *Core) Records() []*telemetry.Record {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]*telemetry.Record, 0, len(c.records))
+	for _, r := range c.records {
+		out = append(out, r)
+	}
+	return out
+}

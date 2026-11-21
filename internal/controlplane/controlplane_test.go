@@ -304,6 +304,12 @@ func TestJobResultReleasesAndRegistersPrebuild(t *testing.T) {
 	if snap == nil || snap.Key != "pb1-new" || snap.BaseImage != "ubuntu-24.04@v1" || snap.Commit != "abc" || !snap.Healthy {
 		t.Fatalf("prebuild = %+v", snap)
 	}
+	if rec := e.core.Record("j1"); rec == nil || !rec.IsPrebuildBuild() {
+		t.Error("j1 record should be marked as a prebuild build")
+	}
+	if n := len(e.core.Records()); n != 3 {
+		t.Errorf("Records() = %d, want 3", n)
+	}
 }
 
 type fakeBurst struct{ subs []jobapi.Submission }
