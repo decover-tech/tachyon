@@ -28,6 +28,7 @@ type Record struct {
 	VCPU          int
 	PrebuildMatch string // full | partial | none
 	Burst         bool   // ran on burst rather than owned capacity
+	Prebuild      bool   // built a prebuild snapshot; billed against the repo's allowance
 
 	mu        sync.Mutex
 	phases    map[Phase]time.Time

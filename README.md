@@ -22,6 +22,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/cache/` | Go | Actions cache scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction |
 | `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
 | `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
+| `internal/billing/` | Go | Metering from the telemetry record: per-second runner time by VM size, per-repo prebuild allowance, storage above quota per GB-month |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
 | `examples/node-go/` | – | A repo config and workflow using Tachyon |
 | `gen/` | Go | Generated from `proto/` by `buf generate`; checked in |

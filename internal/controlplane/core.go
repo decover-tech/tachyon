@@ -51,6 +51,7 @@ type Core struct {
 	Prebuilds Prebuilds
 	Secrets   SecretResolver
 	Burst     Burst
+	Meter     Meter // optional; bills finished jobs
 	Mirrors   mirrors.Endpoints
 	CacheURL  string
 	Log       *slog.Logger
