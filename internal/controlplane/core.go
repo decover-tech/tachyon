@@ -56,6 +56,10 @@ type Core struct {
 	Log       *slog.Logger
 	Now       func() time.Time
 
+	// MirrorPair, if set, overrides Mirrors with the region's
+	// health-checked mirror pair (zero Endpoints = upstream).
+	MirrorPair interface{ Endpoints() mirrors.Endpoints }
+
 	mu       sync.Mutex
 	hosts    map[string]*hostConn
 	hints    map[string]hintEntry // repo@commit -> changed files
@@ -223,7 +227,11 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 		return nil, fmt.Errorf("resolve runner config: %w", err)
 	}
 
-	env := c.Mirrors.Env()
+	mir := c.Mirrors
+	if c.MirrorPair != nil {
+		mir = c.MirrorPair.Endpoints()
+	}
+	env := mir.Env()
 	env["TACHYON_JOB_ID"] = spec.JobID
 	env["TACHYON_PREBUILD_MATCH"] = string(fork.Match)
 	if cfg != nil && fork.Snapshot != nil {
@@ -233,19 +241,22 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 		env["TACHYON_CACHE_URL"] = c.CacheURL
 	}
 	files := map[string][]byte{}
-	if b, err := c.Mirrors.DockerDaemonConfig(nil); err == nil && c.Mirrors.Registry != "" {
+	if b, err := mir.DockerDaemonConfig(nil); err == nil && mir.Registry != "" {
 		files["/etc/docker/daemon.json"] = b
 	}
-	if s := c.Mirrors.AptConf(); s != "" {
+	for p, s := range mir.ContainerdHosts() {
+		files[p] = []byte(s)
+	}
+	if s := mir.AptConf(); s != "" {
 		files["/etc/apt/apt.conf.d/01tachyon-proxy"] = []byte(s)
 	}
-	if s := c.Mirrors.GradleInit(); s != "" {
+	if s := mir.GradleInit(); s != "" {
 		files["~/.gradle/init.d/tachyon.gradle"] = []byte(s)
 	}
-	if s := c.Mirrors.MavenSettings(); s != "" {
+	if s := mir.MavenSettings(); s != "" {
 		files["~/.m2/settings.xml"] = []byte(s)
 	}
-	if s := c.Mirrors.GitConfig([]string{repo}); s != "" {
+	if s := mir.GitConfig([]string{repo}); s != "" {
 		files["/etc/gitconfig.d/tachyon"] = []byte(s)
 	}
 

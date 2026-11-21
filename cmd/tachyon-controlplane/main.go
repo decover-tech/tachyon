@@ -35,6 +35,8 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	mirrorPrimary := flag.String("mirror-primary", "", "primary tachyon-mirror base URL; with -mirror-secondary, health-checked and overrides the static -mirror-* flags")
+	mirrorSecondary := flag.String("mirror-secondary", "", "secondary tachyon-mirror base URL")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -79,6 +81,16 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if *mirrorPrimary != "" || *mirrorSecondary != "" {
+		mon := &mirrors.Monitor{
+			Primary: *mirrorPrimary, Secondary: *mirrorSecondary,
+			Prober: mirrors.HTTPProber{Client: &http.Client{Timeout: 5 * time.Second}},
+			Log:    log,
+		}
+		core.MirrorPair = mon
+		go mon.Run(ctx, 5*time.Second)
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhooks/github", adapter.Handler(core))

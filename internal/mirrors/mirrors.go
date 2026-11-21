@@ -70,12 +70,78 @@ func (e Endpoints) DockerDaemonConfig(base map[string]any) ([]byte, error) {
 	return json.MarshalIndent(cfg, "", "  ")
 }
 
-// AptConf is /etc/apt/apt.conf.d/01tachyon-proxy.
+// PublicAptHosts are the public apt repositories the apt cache mirrors. A
+// leading "." matches any subdomain (regional Ubuntu archives).
+var PublicAptHosts = []string{
+	"archive.ubuntu.com",
+	"security.ubuntu.com",
+	"ports.ubuntu.com",
+	".archive.ubuntu.com",
+	"deb.debian.org",
+	"security.debian.org",
+}
+
+// AptConf is /etc/apt/apt.conf.d/01tachyon-proxy. The proxy is set per
+// public host, so private and third-party apt repositories are reached
+// directly and never go through the mirror.
 func (e Endpoints) AptConf() string {
 	if e.Apt == "" {
 		return ""
 	}
-	return fmt.Sprintf("Acquire::http::Proxy %q;\n", e.Apt)
+	var b strings.Builder
+	for _, h := range PublicAptHosts {
+		if strings.HasPrefix(h, ".") {
+			continue // apt matches exact hosts only
+		}
+		fmt.Fprintf(&b, "Acquire::http::Proxy::%s %q;\n", h, e.Apt)
+	}
+	return b.String()
+}
+
+// EndpointsFor returns the endpoints of one tachyon-mirror instance at base
+// (cmd/tachyon-mirror serves every ecosystem on one listener), or the zero
+// Endpoints, meaning upstream, if base is empty.
+func EndpointsFor(base string) Endpoints {
+	if base == "" {
+		return Endpoints{}
+	}
+	b := strings.TrimSuffix(base, "/")
+	return Endpoints{
+		Registry: b,
+		NPM:      b + "/npm/",
+		PyPI:     b + "/pypi/simple",
+		GoProxy:  b + "/go",
+		Maven:    b + "/maven",
+		Apt:      b,
+		Git:      b + "/git/",
+	}
+}
+
+// MirroredRegistries maps the public registries the registry proxy serves
+// to their API servers. Docker's registry-mirrors only covers Docker Hub;
+// containerd (and BuildKit, nerdctl) use hosts.toml for the rest.
+var MirroredRegistries = map[string]string{
+	"docker.io": "https://registry-1.docker.io",
+	"ghcr.io":   "https://ghcr.io",
+	"quay.io":   "https://quay.io",
+}
+
+// ContainerdHosts returns hosts.toml files (path -> content) that send
+// pulls from the public registries through the registry proxy. containerd
+// adds ?ns=<registry> to mirror requests, which the proxy routes on, and
+// falls back to the registry itself if the mirror fails. Registries not
+// listed are private and get no entry, so they are reached directly.
+func (e Endpoints) ContainerdHosts() map[string]string {
+	if e.Registry == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for r, server := range MirroredRegistries {
+		out["/etc/containerd/certs.d/"+r+"/hosts.toml"] = fmt.Sprintf(
+			"server = %q\n\n[host.%q]\n  capabilities = [\"pull\", \"resolve\"]\n",
+			server, strings.TrimSuffix(e.Registry, "/"))
+	}
+	return out
 }
 
 // GradleInit is an init script that puts the mirror ahead of other repos.

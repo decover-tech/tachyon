@@ -14,13 +14,14 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `hostd/` | Rust | `tachyon-hostd`: warm VM pool, copy-on-write job disks (ZFS), per-VM jailer, Cloud Hypervisor control, sticky-volume promotion, prebuild snapshots |
 | `cmd/tachyon-controlplane/` | Go | Serves GitHub webhooks (HTTP) and the host link (gRPC). In-memory state for now |
 | `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key` |
+| `cmd/tachyon-mirror/` | Go | Regional pull-through package mirror (registry, npm, PyPI, Go, Maven, apt, git), run as a health-checked pair |
 | `internal/jobapi/` | Go | Platform-neutral job spec. Nothing below it knows about GitHub |
 | `internal/frontend/github/` | Go | GitHub Actions adapter: labels, trust derivation, webhook verification, repo-scoped JIT runners, reconcile loop, minimal App REST client |
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
 | `internal/scheduler/` | Go | Placement by prebuild locality, packing by measured usage, CPU oversubscription with automatic step-back, deferrable class |
 | `internal/prebuild/` | Go | `.tachyon/prebuild.yml`, prebuild keys, full/partial/none fork planning, credential scrub list |
 | `internal/cache/` | Go | Actions cache scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction |
-| `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
+| `internal/mirrors/` | Go | Guest configuration for package mirrors, and the control plane's health check of each region's mirror pair. `proxy/` and `gitmirror/` are the mirror itself |
 | `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
 | `examples/node-go/` | – | A repo config and workflow using Tachyon |
@@ -64,6 +65,21 @@ TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
 
 Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090`.
 
+### Running the package mirrors
+
+Run two `tachyon-mirror` instances per region, on separate machines:
+
+```sh
+bin/tachyon-mirror -listen :443 -data /var/cache/tachyon-mirror \
+  -public-url https://mirror-a.r1.tachyon.internal \
+  -tls-cert mirror.pem -tls-key mirror-key.pem \
+  -git-repos acme/api,acme/web
+```
+
+and point the control plane at both with `-mirror-primary https://mirror-a.r1.tachyon.internal -mirror-secondary https://mirror-b.r1.tachyon.internal`. It probes `/healthz` on each every 5 seconds; new jobs use the primary while it is up, then the secondary, and get no mirror config at all (straight to upstream) if both are down. Docker requires TLS for registry mirrors.
+
+Only public content is mirrored: the mirror fetches upstream anonymously, requests that carry credentials pass straight through uncached, private images get a 404 so the client falls back to the registry, the apt proxy only serves public Ubuntu/Debian archives, and the git mirror redirects any repo it can't clone anonymously to GitHub.
+
 ### Running hostd (Linux host)
 
 | Variable | Required | Default |
@@ -88,6 +104,7 @@ Not built yet:
 - **Base image and snapshot pipeline**, built from `actions/runner-images`, plus virtio-pmem/DAX sharing.
 - **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
+- **Mirror rollout.** `tachyon-mirror` is built and tested against fake upstreams only; provisioning the instances, TLS certificates, and feeding the git mirror the list of repos Tachyon builds (a flag for now) are not done.
 - **Persistence.** The control plane keeps all state in memory, and secrets need a managed key store.
 - **mTLS** on the host link, plus **hostd**: cancel, pre-fork, peer snapshot pull, inventory rebuild on restart, and buffering results across reconnects.
 - **Observability export** (OpenTelemetry/Prometheus/ClickHouse) and billing.
