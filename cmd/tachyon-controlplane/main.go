@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/cache"
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
@@ -69,6 +70,9 @@ func main() {
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
 		Log:       log,
+	}
+	if k := os.Getenv("TACHYON_CACHE_KEY"); k != "" {
+		core.CacheSigner = &cache.Signer{Key: []byte(k)}
 	}
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),

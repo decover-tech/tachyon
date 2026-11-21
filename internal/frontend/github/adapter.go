@@ -275,6 +275,7 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 	if runsOn.Clean {
 		policy = jobapi.PrebuildNone
 	}
+	ref, baseRef, defaultRef := rc.CacheRefs()
 	sub := jobapi.Submission{
 		Spec: jobapi.Spec{
 			JobID:    fmt.Sprintf("gh_%d", j.ID),
@@ -286,6 +287,10 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 			Prebuild: jobapi.PrebuildRef{Repo: e.Repository.FullName, Policy: policy},
 			Volumes:  []jobapi.Volume{jobapi.DockerVolume},
 			Trust:    DeriveTrust(rc),
+
+			Ref:           ref,
+			BaseRef:       baseRef,
+			DefaultBranch: defaultRef,
 		},
 		Profile:    fmt.Sprintf("%s/%s/%s", e.Repository.FullName, j.WorkflowName, j.Name),
 		Deferrable: runsOn.Deferrable,

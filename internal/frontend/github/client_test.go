@@ -96,7 +96,8 @@ func TestClientEndpoints(t *testing.T) {
 	mux.HandleFunc("GET /repos/acme/api/actions/runs/7", func(w http.ResponseWriter, r *http.Request) {
 		checkAuth(r)
 		w.Write([]byte(`{"event":"push","head_branch":"release/1","head_repository":{"full_name":"acme/api"},
-			"repository":{"full_name":"acme/api","default_branch":"main"}}`))
+			"repository":{"full_name":"acme/api","default_branch":"main"},
+			"pull_requests":[{"number":12,"base":{"ref":"main"}}]}`))
 	})
 	mux.HandleFunc("GET /repos/acme/api/branches/{b}", func(w http.ResponseWriter, r *http.Request) {
 		checkAuth(r)
@@ -140,7 +141,7 @@ func TestClientEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := RunContext{Event: "push", HeadBranch: "release/1", HeadRepo: "acme/api", BaseRepo: "acme/api", DefaultBranch: "main", Protected: true}
+	want := RunContext{Event: "push", HeadBranch: "release/1", HeadRepo: "acme/api", BaseRepo: "acme/api", DefaultBranch: "main", Protected: true, PRNumber: 12, BaseBranch: "main"}
 	if rc != want {
 		t.Errorf("RunContext = %+v", rc)
 	}
