@@ -23,7 +23,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
 | `internal/images/` | Go | Base image pipeline: build plan from the runner-images Packer template, manifest, ed25519 signing, SPDX SBOM, canary-first rollout and version retention |
 | `cmd/tachyon-image/` | Go | Pipeline tool `images/*/build.sh` calls: `plan`, `sbom`, `manifest`, `sign`, `verify`, `diff` |
-| `images/ubuntu-24.04/` | – | `image.yml` (pinned runner-images commit, trims) and `build.sh` (Linux builder: ext4 image, SBOM, signed manifest); rebuilt weekly by `.github/workflows/base-image.yml` |
+| `images/ubuntu-24.04/` | – | `image.yml` (pinned runner-images commit, trims) and `build.sh` (Linux builder: ext4 image, SBOM, unsigned manifest); rebuilt weekly by `.github/workflows/base-image.yml`, which signs the manifest in a separate job that never runs build code |
 | `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
 | `examples/node-go/` | – | A repo config and workflow using Tachyon |
@@ -93,7 +93,7 @@ Built and unit-tested: the job spec, GitHub adapter, scheduler, prebuild config/
 Not built yet:
 
 - **Guest agent.** The in-VM process that receives the vsock payload, mounts disks, stashes warm paths, starts the runner and reports results. hostd's side of that protocol exists (`hostd/src/hypervisor.rs`).
-- **Base image pipeline, the parts that need real infrastructure.** The pipeline (build plan, `build.sh`, signing, SBOM, rollout, per-size snapshot builder) exists, but no image has been built on a real builder or booted under Cloud Hypervisor yet, there is no image store to push images to hosts, and hostd still restores every VM from the single `TACHYON_BASE_SNAPSHOTS` version rather than the version a job is assigned.
+- **Base image pipeline, the parts that need real infrastructure.** The pipeline (build plan, `build.sh`, signing, SBOM, rollout, per-size snapshot builder) exists, but no image has been built on a real builder or booted under Cloud Hypervisor yet, there is no image store to push images to hosts, and hostd still restores every VM from the single `TACHYON_BASE_SNAPSHOTS` version rather than the version a job is assigned. Builds are not yet byte-reproducible: some upstream install scripts download "latest" artifacts outside apt.
 - **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
 - **Persistence.** The control plane keeps all state in memory, and secrets need a managed key store.

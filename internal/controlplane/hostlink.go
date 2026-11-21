@@ -94,11 +94,19 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 
 	defer func() {
 		c.mu.Lock()
-		if c.hosts[hc.id] == hc {
+		gone := c.hosts[hc.id] == hc
+		if gone {
 			delete(c.hosts, hc.id)
 			close(hc.closed)
 		}
 		c.mu.Unlock()
+		// The rollout counts only connected hosts when it decides a
+		// version is on every host. A host that reconnects reports its
+		// images again in its next heartbeat. Skip this if a newer stream
+		// for the same host has already replaced this one.
+		if ir, ok := c.Images.(ImageRollout); ok && gone {
+			ir.ForgetHost(hc.id)
+		}
 		// Running jobs keep running on the host; capacity stays reserved
 		// until the host reconnects or is declared dead by missed heartbeats.
 	}()

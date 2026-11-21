@@ -34,6 +34,9 @@ type ImageRollout interface {
 	// Unassign forgets a job that was never dispatched.
 	Unassign(jobID string)
 	ObserveHost(hostID string, images []string, draining bool)
+	// ForgetHost drops a host that disconnected, so a host that never
+	// comes back does not hold every later version back from going live.
+	ForgetHost(hostID string)
 	ObserveResult(jobID string, infraError bool)
 }
 

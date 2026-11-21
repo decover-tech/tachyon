@@ -88,3 +88,54 @@ func TestImageRolloutThroughHostLink(t *testing.T) {
 		t.Fatalf("after rollback job on %s", a.GetBaseImage())
 	}
 }
+
+// A host that disconnects and never comes back must not keep a new
+// version from going live: the rollout forgets it on disconnect.
+func TestImageRolloutForgetsDisconnectedHost(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	ro := &images.Rollout{Trusted: []ed25519.PublicKey{pub}}
+	e := newEnv()
+	e.core.Images = ro
+
+	const v1 = "ubuntu-24.04@2026-11-16"
+	if _, err := ro.Publish(signedImage(t, priv, "2026-11-16")); err != nil {
+		t.Fatal(err)
+	}
+	a := e.connect(t, "a", "us", 16, 64)
+	gone := e.connect(t, "gone", "us", 16, 64)
+	a.push(t, heartbeat(false, baseImageRef(v1)))
+	gone.push(t, heartbeat(false)) // has not pulled v1
+	if tr := ro.Advance(); len(tr) != 0 {
+		t.Fatalf("went live while a host lacks it: %v", tr)
+	}
+
+	gone.disconnect()
+	if tr := ro.Advance(); len(tr) != 1 || tr[0].To != images.Live {
+		t.Fatalf("after disconnect: %v", tr)
+	}
+	if p, err := ro.Pin("ubuntu-24.04"); err != nil || p != v1 {
+		t.Fatalf("pin %s %v", p, err)
+	}
+}
+
+// When a reconnect replaces a host's stream, the old stream closing must
+// not forget the view the new stream reported.
+func TestImageRolloutReconnectKeepsHostView(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	ro := &images.Rollout{Trusted: []ed25519.PublicKey{pub}}
+	e := newEnv()
+	e.core.Images = ro
+
+	if _, err := ro.Publish(signedImage(t, priv, "2026-11-16")); err != nil {
+		t.Fatal(err)
+	}
+	a := e.connect(t, "a", "us", 16, 64)
+	old := e.connect(t, "h", "us", 16, 64)
+	a.push(t, heartbeat(false, baseImageRef("ubuntu-24.04@2026-11-16")))
+	cur := e.connect(t, "h", "us", 16, 64) // replaces old
+	cur.push(t, heartbeat(false))          // h lacks v1
+	old.disconnect()
+	if tr := ro.Advance(); len(tr) != 0 {
+		t.Fatalf("went live while connected host h lacks it: %v", tr)
+	}
+}

@@ -17,6 +17,9 @@ permissions:
   contents: read
 
 jobs:
+  # Runs upstream install scripts as root in a chroot, which is not a
+  # security boundary: the build is untrusted code. It never sees the
+  # signing key; the sign job below runs on a fresh runner.
   build:
     if: vars.TACHYON_IMAGE_PIPELINE == 'enabled'
     runs-on: ${{ vars.TACHYON_IMAGE_BUILDER || 'ubuntu-24.04' }}
@@ -27,25 +30,58 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go build -o "$RUNNER_TEMP/tachyon-image" ./cmd/tachyon-image
-      - name: Build
+      - name: Build (unsigned)
         env:
-          KEY: ${{ secrets.TACHYON_IMAGE_SIGNING_KEY }}
           VERSION: ${{ inputs.version }}
         run: |
-          umask 077
-          printf '%s\n' "$KEY" > "$RUNNER_TEMP/signing.pem"
           sudo TACHYON_IMAGE="$RUNNER_TEMP/tachyon-image" \
             TACHYON_IMAGE_VERSION="$VERSION" \
-            TACHYON_IMAGE_SIGNING_KEY="$RUNNER_TEMP/signing.pem" \
             images/ubuntu-24.04/build.sh "$RUNNER_TEMP/image"
-          rm -f "$RUNNER_TEMP/signing.pem"
-      - name: Verify signature and digests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: base-image-unsigned
+          path: |
+            ${{ runner.temp }}/image/manifest.json
+            ${{ runner.temp }}/image/sbom.spdx.json
+      # Pushing rootfs.ext4 to the image store and publishing the signed
+      # manifest to the control plane's rollout is not wired yet: the image
+      # store is not decided (see docs/architecture.md, Distribution). Once
+      # it is, the store must check the uploaded rootfs against the digest
+      # in the signed manifest (tachyon-image verify -dir).
+
+  # Signs the manifest on a fresh GitHub-hosted runner that has run none of
+  # the build's code. The key exists only for the one step that uses it.
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build -o "$RUNNER_TEMP/tachyon-image" ./cmd/tachyon-image
+      - uses: actions/download-artifact@v4
+        with:
+          name: base-image-unsigned
+          path: ${{ runner.temp }}/image
+      - name: Sign
+        env:
+          KEY: ${{ secrets.TACHYON_IMAGE_SIGNING_KEY }}
+        run: |
+          umask 077
+          key=$(mktemp)
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$KEY" > "$key"
+          "$RUNNER_TEMP/tachyon-image" sign -key "$key" \
+            -o "$RUNNER_TEMP/image/manifest.signed.json" "$RUNNER_TEMP/image/manifest.json"
+      - name: Verify signature
         env:
           TRUSTED: ${{ vars.TACHYON_IMAGE_TRUSTED_KEYS }}
         run: |
           printf '%s\n' "$TRUSTED" > "$RUNNER_TEMP/trusted.pem"
           "$RUNNER_TEMP/tachyon-image" verify -trust "$RUNNER_TEMP/trusted.pem" \
-            -dir "$RUNNER_TEMP/image" "$RUNNER_TEMP/image/manifest.signed.json"
+            "$RUNNER_TEMP/image/manifest.signed.json"
       - uses: actions/upload-artifact@v4
         with:
           name: base-image-manifest
@@ -53,6 +89,3 @@ jobs:
             ${{ runner.temp }}/image/manifest.json
             ${{ runner.temp }}/image/manifest.signed.json
             ${{ runner.temp }}/image/sbom.spdx.json
-      # Pushing rootfs.ext4 to the image store and publishing the signed
-      # manifest to the control plane's rollout is not wired yet: the image
-      # store is not decided (see docs/architecture.md, Distribution).

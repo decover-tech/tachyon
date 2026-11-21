@@ -4,7 +4,6 @@
 #   OUT_DIR/rootfs.ext4             the read-only lower layer hosts map via virtio-pmem
 #   OUT_DIR/sbom.spdx.json          SPDX 2.3 SBOM (dpkg packages + tool cache)
 #   OUT_DIR/manifest.json           what was built, from what, with digests
-#   OUT_DIR/manifest.signed.json    ed25519-signed manifest (if a key is given)
 #
 # Per-size paused Cloud Hypervisor snapshots are not made here: each host
 # makes them from the verified ext4 file (`tachyon-hostd prepare-image`),
@@ -14,13 +13,19 @@
 # git, xz, sha256sum and e2fsprogs >= 1.47.1 (for E2FSPROGS_FAKE_TIME and
 # mkfs.ext4 -d), and tachyon-image (go build ./cmd/tachyon-image).
 #
-#   sudo TACHYON_IMAGE_SIGNING_KEY=/secure/key.pem images/ubuntu-24.04/build.sh /var/tmp/img
+#   sudo images/ubuntu-24.04/build.sh /var/tmp/img
+#   tachyon-image sign -key /secure/key.pem -o /var/tmp/img/manifest.signed.json /var/tmp/img/manifest.json
+#
+# build.sh never signs. It runs upstream install scripts as root in a
+# chroot, which does not contain root, so the signing key must not be on
+# the machine while it runs. Sign only after it exits, preferably on a
+# machine that has not run the build (CI signs in a separate job on a fresh
+# runner; see .github/workflows/base-image.yml).
 #
 # Environment:
 #   TACHYON_IMAGE                 tachyon-image binary (default: on PATH)
 #   TACHYON_IMAGE_VERSION         image version (default: this week's Monday)
 #   APT_SNAPSHOT                  snapshot.ubuntu.com timestamp (default: the version's date)
-#   TACHYON_IMAGE_SIGNING_KEY     ed25519 PKCS#8 PEM; unset = unsigned (dev builds only)
 #   KERNEL                        guest kernel (vmlinux) to ship alongside, optional
 #
 # Reproducibility: every input is pinned (runner-images commit, base rootfs
@@ -160,7 +165,7 @@ E2FSPROGS_FAKE_TIME=$SOURCE_DATE_EPOCH mkfs.ext4 -q -F -b 4096 -O ^has_journal \
 	-d "$root" "$out/rootfs.ext4" "${ROOTFS_SIZE_GB}G"
 e2fsck -fn "$out/rootfs.ext4" >/dev/null
 
-# ---- 7. SBOM, manifest, signature -------------------------------------------
+# ---- 7. SBOM, manifest ------------------------------------------------------
 "$ti" sbom -ref "$ref" -source-date-epoch "$SOURCE_DATE_EPOCH" \
 	-dpkg "$work/dpkg.tsv" -toolcache "$work/toolcache.tsv" -o "$out/sbom.spdx.json"
 
@@ -173,10 +178,4 @@ fi
 	-apt-snapshot "$apt_snapshot" -plan-sha256 "$plan_sha" \
 	-source-date-epoch "$SOURCE_DATE_EPOCH" "${kernel_args[@]}" -o "$out/manifest.json"
 
-if [[ -n ${TACHYON_IMAGE_SIGNING_KEY:-} ]]; then
-	"$ti" sign -key "$TACHYON_IMAGE_SIGNING_KEY" -o "$out/manifest.signed.json" "$out/manifest.json"
-	log "$ref: signed"
-else
-	log "$ref: TACHYON_IMAGE_SIGNING_KEY unset; manifest NOT signed (hosts will refuse it)"
-fi
-log "$ref: built in $out"
+log "$ref: built in $out (unsigned; sign manifest.json in a separate step)"
