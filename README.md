@@ -18,6 +18,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/frontend/github/` | Go | GitHub Actions adapter: labels, trust derivation, webhook verification, repo-scoped JIT runners, reconcile loop, minimal App REST client |
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
 | `internal/scheduler/` | Go | Placement by prebuild locality, packing by measured usage, CPU oversubscription with automatic step-back, deferrable class |
+| `internal/burst/` | Go | Burst capacity when owned hosts are full: cheapest on-demand or hourly bare-metal offer, spot only for short profiles, spill to the next region. Cloud APIs sit behind `burst.Provider` |
 | `internal/prebuild/` | Go | `.tachyon/prebuild.yml`, prebuild keys, full/partial/none fork planning, credential scrub list |
 | `internal/cache/` | Go | Actions cache scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction |
 | `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |

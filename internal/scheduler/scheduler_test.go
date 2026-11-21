@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/decover-tech/tachyon/internal/jobapi"
 )
@@ -255,5 +256,21 @@ func TestRemoveHost(t *testing.T) {
 	s.UpsertHost(host("h", "us", 4, 16))
 	if _, err := s.Place(sub("j", 4)); err != nil {
 		t.Fatalf("job id should be free after host removal: %v", err)
+	}
+}
+
+func TestProfileP95DurationIgnoresUnknown(t *testing.T) {
+	p := &Profiles{MinSamples: 3}
+	for i := 0; i < 3; i++ {
+		p.Observe("k", Usage{CPU: 1, MemGB: 1})
+	}
+	if prof, ok := p.Get("k"); !ok || prof.P95Duration != 0 {
+		t.Fatalf("no durations: %+v ok=%v", prof, ok)
+	}
+	for i := 1; i <= 20; i++ {
+		p.Observe("k", Usage{CPU: 1, MemGB: 1, Duration: time.Duration(i) * time.Minute})
+	}
+	if prof, _ := p.Get("k"); prof.P95Duration != 19*time.Minute {
+		t.Fatalf("P95Duration = %v", prof.P95Duration)
 	}
 }

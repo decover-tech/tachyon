@@ -4,12 +4,15 @@ import (
 	"math"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Usage is one finished job's measured resource use.
 type Usage struct {
 	CPU   float64 // average busy vCPUs
 	MemGB float64 // peak memory
+	// Duration is the job's run time; zero when unknown.
+	Duration time.Duration
 }
 
 // Profile is the packing estimate for a repo/workflow/job name.
@@ -18,6 +21,8 @@ type Profile struct {
 	P95CPU    float64
 	P99MemGB  float64
 	PeakMemGB float64
+	// P95Duration is over samples with a known duration; zero if none.
+	P95Duration time.Duration
 }
 
 // Profiles keeps a bounded window of usage samples per profile key.
@@ -61,15 +66,23 @@ func (p *Profiles) Get(key string) (Profile, bool) {
 	}
 	cpu := make([]float64, len(s))
 	mem := make([]float64, len(s))
+	var dur []float64
 	for i, u := range s {
 		cpu[i], mem[i] = u.CPU, u.MemGB
+		if u.Duration > 0 {
+			dur = append(dur, float64(u.Duration))
+		}
 	}
-	return Profile{
+	prof := Profile{
 		Samples:   len(s),
 		P95CPU:    percentile(cpu, 0.95),
 		P99MemGB:  percentile(mem, 0.99),
 		PeakMemGB: percentile(mem, 1),
-	}, true
+	}
+	if len(dur) > 0 {
+		prof.P95Duration = time.Duration(percentile(dur, 0.95))
+	}
+	return prof, true
 }
 
 // percentile uses nearest-rank.
