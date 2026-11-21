@@ -15,10 +15,11 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::hypervisor::{GuestDisk, GuestPayload, GuestPrebuild, Hypervisor};
 use crate::pb;
+use crate::prefork::PreForks;
 use crate::storage::{self, Storage};
 
 /// Max job wall time, matching GitHub-hosted runners.
@@ -34,6 +35,8 @@ pub struct Agent<H: Hypervisor, S: Storage> {
     /// Paused VMs kept ready per vCPU size.
     pub warm_target: HashMap<u32, usize>,
     pool: Mutex<HashMap<u32, Vec<H::Vm>>>,
+    /// Job disks forked ahead of assignment from push/PR hints.
+    pub(crate) pre_forks: PreForks,
 }
 
 impl<H: Hypervisor, S: Storage> Agent<H, S> {
@@ -43,6 +46,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             storage,
             warm_target,
             pool: Mutex::new(HashMap::new()),
+            pre_forks: PreForks::default(),
         }
     }
 
@@ -116,15 +120,22 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             anyhow::bail!("prebuilds may only be built from trusted refs");
         }
 
-        // Job disk: copy-on-write fork of the prebuild, or an empty disk.
-        let job_disk = storage::job_disk(&job.job_id);
-        if job.prebuild_snapshot_id.is_empty() {
-            self.storage.create_empty(&job_disk, EMPTY_DISK_GB)?;
+        // Job disk: a disk pre-forked for this repo/commit if one is held,
+        // else a copy-on-write fork of the prebuild, or an empty disk.
+        let job_disk = if let Some(d) = self.take_pre_fork(job, SystemTime::now()) {
+            tracing::info!(job = %job.job_id, disk = %d, "using pre-forked disk");
+            d
         } else {
-            self.storage
-                .clone_snapshot(&job.prebuild_snapshot_id, &job_disk)
-                .context("fork prebuild")?;
-        }
+            let d = storage::job_disk(&job.job_id);
+            if job.prebuild_snapshot_id.is_empty() {
+                self.storage.create_empty(&d, EMPTY_DISK_GB)?;
+            } else {
+                self.storage
+                    .clone_snapshot(&job.prebuild_snapshot_id, &d)
+                    .context("fork prebuild")?;
+            }
+            d
+        };
         disks.push(job_disk.clone());
 
         // Sticky volumes: clone-then-promote, so two jobs never write the

@@ -131,6 +131,24 @@ where
             })
         };
 
+        let sweep = {
+            let agent = self.agent.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(crate::prefork::SWEEP_INTERVAL);
+                loop {
+                    tick.tick().await;
+                    let agent = agent.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let n = agent.expire_pre_forks(SystemTime::now());
+                        if n > 0 {
+                            tracing::info!(count = n, "expired pre-forks destroyed");
+                        }
+                    })
+                    .await;
+                }
+            })
+        };
+
         let result = async {
             while let Some(m) = inbound.message().await? {
                 match m.msg {
@@ -143,10 +161,7 @@ where
                         // TODO: signal the guest agent to stop the runner.
                         tracing::warn!(job = %c.job_id, "cancel not implemented yet");
                     }
-                    Some(pb::link_response::Msg::PreFork(p)) => {
-                        // TODO: clone a job disk ahead of the queued event.
-                        tracing::debug!(repo = %p.repo, "pre-fork hint ignored for now");
-                    }
+                    Some(pb::link_response::Msg::PreFork(p)) => self.start_pre_fork(p),
                     Some(pb::link_response::Msg::PullSnapshot(p)) => {
                         // TODO: incremental zfs send/recv from the peer.
                         tracing::info!(from = %p.from_host_id, "snapshot pull not implemented yet");
@@ -158,7 +173,18 @@ where
         }
         .await;
         hb.abort();
+        sweep.abort();
         result
+    }
+
+    /// Clones a job disk for a hinted repo/commit off the async runtime.
+    /// Failures only cost the later job its head start.
+    fn start_pre_fork(&self, p: pb::PreFork) {
+        let agent = self.agent.clone();
+        tokio::task::spawn_blocking(move || match agent.pre_fork(&p, SystemTime::now()) {
+            Ok(()) => tracing::debug!(repo = %p.repo, commit = %p.commit, "pre-forked job disk"),
+            Err(e) => tracing::warn!(repo = %p.repo, error = %format!("{e:#}"), "pre-fork"),
+        });
     }
 
     fn start_job(&self, job: pb::AssignJob, tx: mpsc::Sender<pb::LinkRequest>) {

@@ -1282,15 +1282,20 @@ func (x *PrebuildBuild) GetEgressAllowlist() []string {
 	return nil
 }
 
-// A job for this repo is likely coming; fork its disk now.
+// A job for this repo is likely coming; fork its disk now. hostd holds the
+// fork until expires_at (or a hostd default when unset) and hands it to the
+// first AssignJob with the same repo, commit and prebuild_snapshot_id.
+// Unused forks are destroyed once they expire.
 type PreFork struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	PreForkId          string                 `protobuf:"bytes,1,opt,name=pre_fork_id,json=preForkId,proto3" json:"pre_fork_id,omitempty"`
 	Repo               string                 `protobuf:"bytes,2,opt,name=repo,proto3" json:"repo,omitempty"`
 	PrebuildSnapshotId string                 `protobuf:"bytes,3,opt,name=prebuild_snapshot_id,json=prebuildSnapshotId,proto3" json:"prebuild_snapshot_id,omitempty"`
 	ExpiresAt          *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Commit the hint was for; matched against AssignJob.commit.
+	Commit        string `protobuf:"bytes,5,opt,name=commit,proto3" json:"commit,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PreFork) Reset() {
@@ -1349,6 +1354,13 @@ func (x *PreFork) GetExpiresAt() *timestamppb.Timestamp {
 		return x.ExpiresAt
 	}
 	return nil
+}
+
+func (x *PreFork) GetCommit() string {
+	if x != nil {
+		return x.Commit
+	}
+	return ""
 }
 
 type CancelJob struct {
@@ -1609,13 +1621,14 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"keep_paths\x18\x03 \x03(\tR\tkeepPaths\x12\x1f\n" +
 	"\vscrub_paths\x18\x04 \x03(\tR\n" +
 	"scrubPaths\x12)\n" +
-	"\x10egress_allowlist\x18\x05 \x03(\tR\x0fegressAllowlist\"\xaa\x01\n" +
+	"\x10egress_allowlist\x18\x05 \x03(\tR\x0fegressAllowlist\"\xc2\x01\n" +
 	"\aPreFork\x12\x1e\n" +
 	"\vpre_fork_id\x18\x01 \x01(\tR\tpreForkId\x12\x12\n" +
 	"\x04repo\x18\x02 \x01(\tR\x04repo\x120\n" +
 	"\x14prebuild_snapshot_id\x18\x03 \x01(\tR\x12prebuildSnapshotId\x129\n" +
 	"\n" +
-	"expires_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\"\"\n" +
+	"expires_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt\x12\x16\n" +
+	"\x06commit\x18\x05 \x01(\tR\x06commit\"\"\n" +
 	"\tCancelJob\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\"\x1d\n" +
 	"\x05Drain\x12\x14\n" +

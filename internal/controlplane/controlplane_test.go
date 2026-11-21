@@ -220,8 +220,12 @@ func TestSubmitPartialWhenKeyFileChanged(t *testing.T) {
 	if err := e.core.Hint(context.Background(), jobapi.Hint{Repo: "github.com/acme/api", Commit: "abc", ChangedFiles: []string{"go.sum"}}); err != nil {
 		t.Fatal(err)
 	}
-	if pf := s.next(t).GetPreFork(); pf == nil || pf.GetPrebuildSnapshotId() != "snap" || pf.GetRepo() != "acme/api" {
+	pf := s.next(t).GetPreFork()
+	if pf == nil || pf.GetPrebuildSnapshotId() != "snap" || pf.GetRepo() != "acme/api" || pf.GetCommit() != "abc" {
 		t.Fatalf("expected PreFork, got %v", pf)
+	}
+	if ttl := time.Until(pf.GetExpiresAt().AsTime()); ttl <= 0 || ttl > preForkTTL {
+		t.Errorf("pre-fork expires in %v, want within %v", ttl, preForkTTL)
 	}
 	if err := e.core.Submit(context.Background(), e.submission(t, "j1", 2)); err != nil {
 		t.Fatal(err)
