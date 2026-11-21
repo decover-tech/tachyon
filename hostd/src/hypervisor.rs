@@ -9,10 +9,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::jailer::{slot_ids, JailSpec};
@@ -85,6 +87,27 @@ pub struct GuestResult {
     pub secret_scan_clean: Option<bool>,
 }
 
+/// Control messages hostd sends the guest agent after the payload, on the
+/// same vsock connection and with the same framing (u32 big-endian length,
+/// then JSON).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GuestControl {
+    /// Stop the runner (the job was cancelled). The guest agent stops it,
+    /// then sends its GuestResult as usual.
+    StopRunner,
+}
+
+/// Reaches a running guest from another thread while `Hypervisor::wait`
+/// blocks on it. Used to cancel jobs.
+pub trait GuestStop: Send + Sync {
+    /// Asks the guest agent to stop the runner.
+    fn stop_runner(&self) -> Result<()>;
+    /// Makes a blocked `wait` return an error, for when the guest does not
+    /// report in time after `stop_runner`.
+    fn abort_wait(&self);
+}
+
 /// Measured resource use, read from the VM's cgroup.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Usage {
@@ -105,6 +128,9 @@ pub trait Hypervisor: Send + Sync {
     fn send_payload(&self, vm: &mut Self::Vm, payload: &GuestPayload) -> Result<()>;
     /// Blocks until the guest reports its result (or the deadline passes).
     fn wait(&self, vm: &mut Self::Vm, deadline: Duration) -> Result<GuestResult>;
+    /// A handle for stopping the guest while `wait` blocks. Valid after
+    /// `send_payload`.
+    fn guest_stop(&self, vm: &Self::Vm) -> Result<Arc<dyn GuestStop>>;
     fn usage(&self, vm: &Self::Vm) -> Usage;
     fn destroy(&self, vm: Self::Vm) -> Result<()>;
 }
@@ -268,6 +294,14 @@ impl Hypervisor for CloudHypervisor {
         Ok(serde_json::from_slice(&body)?)
     }
 
+    fn guest_stop(&self, vm: &ChVm) -> Result<Arc<dyn GuestStop>> {
+        let s = vm
+            .agent
+            .as_ref()
+            .ok_or_else(|| anyhow!("no guest agent connection"))?;
+        Ok(Arc::new(VsockGuestStop(s.try_clone()?)))
+    }
+
     fn usage(&self, vm: &ChVm) -> Usage {
         read_cgroup_usage(&vm.jail.cgroup_dir(), vm.started.elapsed())
     }
@@ -279,6 +313,25 @@ impl Hypervisor for CloudHypervisor {
         vm.jail.remove_cgroup()?;
         fs::remove_dir_all(&vm.dir).ok();
         Ok(())
+    }
+}
+
+/// GuestStop over a clone of the guest agent's vsock connection.
+struct VsockGuestStop(UnixStream);
+
+impl GuestStop for VsockGuestStop {
+    fn stop_runner(&self) -> Result<()> {
+        let body = serde_json::to_vec(&GuestControl::StopRunner)?;
+        let mut s = &self.0;
+        s.set_write_timeout(Some(Duration::from_secs(5)))?;
+        s.write_all(&(body.len() as u32).to_be_bytes())?;
+        s.write_all(&body)?;
+        Ok(())
+    }
+
+    fn abort_wait(&self) {
+        // Shutting the socket down wakes the reader blocked in `wait`.
+        let _ = self.0.shutdown(Shutdown::Both);
     }
 }
 
@@ -316,7 +369,55 @@ pub fn read_cgroup_usage(dir: &std::path::Path, wall: Duration) -> Usage {
 #[cfg(test)]
 pub mod fake {
     use super::*;
-    use std::sync::Mutex;
+    use std::sync::{Condvar, Mutex};
+
+    /// The fake guest's state, shared with its GuestStop handle.
+    #[derive(Default)]
+    pub struct FakeGuest {
+        state: Mutex<FakeGuestState>,
+        cv: Condvar,
+    }
+
+    #[derive(Default)]
+    struct FakeGuestState {
+        waiting: bool,
+        stop_requests: u32,
+        stopped: bool,
+        aborted: bool,
+    }
+
+    impl FakeGuest {
+        pub fn waiting(&self) -> bool {
+            self.state.lock().unwrap().waiting
+        }
+        pub fn stop_requests(&self) -> u32 {
+            self.state.lock().unwrap().stop_requests
+        }
+        pub fn aborted(&self) -> bool {
+            self.state.lock().unwrap().aborted
+        }
+    }
+
+    struct FakeGuestStop {
+        guest: Arc<FakeGuest>,
+        ignore_stop: bool,
+    }
+
+    impl GuestStop for FakeGuestStop {
+        fn stop_runner(&self) -> Result<()> {
+            let mut st = self.guest.state.lock().unwrap();
+            st.stop_requests += 1;
+            if !self.ignore_stop {
+                st.stopped = true;
+            }
+            self.guest.cv.notify_all();
+            Ok(())
+        }
+        fn abort_wait(&self) {
+            self.guest.state.lock().unwrap().aborted = true;
+            self.guest.cv.notify_all();
+        }
+    }
 
     pub struct FakeVm {
         pub id: String,
@@ -333,6 +434,12 @@ pub mod fake {
         pub restored: AtomicU32,
         pub destroyed: Mutex<Vec<String>>,
         pub payloads: Mutex<Vec<GuestPayload>>,
+        /// When set, `wait` blocks until the guest is stopped or aborted,
+        /// like a long-running job.
+        pub block_wait: bool,
+        /// When set, the guest ignores stop requests.
+        pub ignore_stop: bool,
+        pub guest: Arc<FakeGuest>,
     }
 
     impl Hypervisor for FakeHypervisor {
@@ -364,6 +471,23 @@ pub mod fake {
             Ok(())
         }
         fn wait(&self, _vm: &mut FakeVm, _d: Duration) -> Result<GuestResult> {
+            if self.block_wait {
+                let mut st = self.guest.state.lock().unwrap();
+                st.waiting = true;
+                self.guest.cv.notify_all();
+                while !st.stopped && !st.aborted {
+                    st = self.guest.cv.wait(st).unwrap();
+                }
+                st.waiting = false;
+                if !st.stopped {
+                    bail!("guest result (VM died or deadline passed)");
+                }
+                // The runner was stopped: SIGTERM's exit status.
+                return Ok(GuestResult {
+                    exit_code: 143,
+                    ..Default::default()
+                });
+            }
             if self.fail_wait {
                 bail!("VM died");
             }
@@ -372,6 +496,12 @@ pub mod fake {
                 secret_scan_clean: Some(true),
                 ..Default::default()
             })
+        }
+        fn guest_stop(&self, _vm: &FakeVm) -> Result<Arc<dyn GuestStop>> {
+            Ok(Arc::new(FakeGuestStop {
+                guest: self.guest.clone(),
+                ignore_stop: self.ignore_stop,
+            }))
         }
         fn usage(&self, _vm: &FakeVm) -> Usage {
             Usage {
@@ -400,6 +530,35 @@ mod tests {
         assert!(!format!("{p}").contains(&p.runner_config_b64));
         assert!(!format!("{p}").contains("super-secret"));
         assert!(!format!("{p:?}").contains(&p.runner_config_b64));
+    }
+
+    #[test]
+    fn guest_control_wire_format() {
+        let j = serde_json::to_string(&GuestControl::StopRunner).unwrap();
+        assert_eq!(j, r#"{"type":"stop_runner"}"#);
+    }
+
+    #[test]
+    fn vsock_stop_sends_frame_and_abort_unblocks_wait() {
+        let (host, mut guest) = UnixStream::pair().unwrap();
+        let stop = VsockGuestStop(host.try_clone().unwrap());
+        stop.stop_runner().unwrap();
+        let mut len = [0u8; 4];
+        guest.read_exact(&mut len).unwrap();
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        guest.read_exact(&mut body).unwrap();
+        let msg: GuestControl = serde_json::from_slice(&body).unwrap();
+        assert_eq!(msg, GuestControl::StopRunner);
+
+        // A reader blocked on the host side (as in `wait`) is released.
+        let mut reader = host;
+        let t = std::thread::spawn(move || {
+            let mut b = [0u8; 4];
+            reader.read_exact(&mut b)
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        stop.abort_wait();
+        assert!(t.join().unwrap().is_err());
     }
 
     #[test]

@@ -140,8 +140,17 @@ where
                         tracing::info!(drain = d.drain, "drain state changed");
                     }
                     Some(pb::link_response::Msg::Cancel(c)) => {
-                        // TODO: signal the guest agent to stop the runner.
-                        tracing::warn!(job = %c.job_id, "cancel not implemented yet");
+                        // The job's own task reports OUTCOME_CANCELLED once
+                        // the VM is gone. Signalling the guest is a small
+                        // vsock write, but keep it off the reactor anyway.
+                        let agent = self.agent.clone();
+                        tokio::task::spawn_blocking(move || {
+                            if agent.cancel(&c.job_id) {
+                                tracing::info!(job = %c.job_id, "cancelling");
+                            } else {
+                                tracing::warn!(job = %c.job_id, "cancel for unknown job");
+                            }
+                        });
                     }
                     Some(pb::link_response::Msg::PreFork(p)) => {
                         // TODO: clone a job disk ahead of the queued event.
@@ -164,6 +173,7 @@ where
     fn start_job(&self, job: pb::AssignJob, tx: mpsc::Sender<pb::LinkRequest>) {
         let job_id = job.job_id.clone();
         self.running.lock().unwrap().insert(job_id.clone(), ());
+        self.agent.admit(&job_id);
         let (agent, inv, running) = (
             self.agent.clone(),
             self.inventory.clone(),
