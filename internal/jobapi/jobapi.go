@@ -105,8 +105,9 @@ func WithDockerVolume(vols []Volume) []Volume {
 }
 
 // validateVolumes checks that every mount is an absolute, clean path other
-// than the root (the root is the overlay) and that keys and mounts are
-// unique.
+// than the root (the root is the overlay), that the reserved docker key is
+// used only at /var/lib/docker, and that keys and mounts are unique. These
+// are the same rules hostd's plan_volumes (hostd/src/rootfs.rs) enforces.
 func validateVolumes(vols []Volume) error {
 	keys := map[string]bool{}
 	mounts := map[string]bool{}
@@ -118,6 +119,8 @@ func validateVolumes(vols []Volume) error {
 			return fmt.Errorf("volume %q: mount %q must be a clean absolute path", v.Key, v.Mount)
 		case v.Mount == "/":
 			return fmt.Errorf("volume %q: cannot mount over the overlay root", v.Key)
+		case v.Key == DockerVolume.Key && v.Mount != DockerVolume.Mount:
+			return fmt.Errorf("volume key %q is reserved for %s, not %q", DockerVolume.Key, DockerVolume.Mount, v.Mount)
 		case keys[v.Key]:
 			return fmt.Errorf("duplicate volume key %q", v.Key)
 		case mounts[v.Mount]:

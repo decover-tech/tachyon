@@ -34,8 +34,14 @@ func TestSpecValidate(t *testing.T) {
 		{"relative mount", func(s *Spec) { s.Volumes = []Volume{{Kind: VolumeSticky, Key: "r", Mount: "var/x"}} }, true},
 		{"unclean mount", func(s *Spec) { s.Volumes = []Volume{{Kind: VolumeSticky, Key: "r", Mount: "/var/../x"}} }, true},
 		{"missing key", func(s *Spec) { s.Volumes = []Volume{{Kind: VolumeSticky, Mount: "/x"}} }, true},
+		{"docker key elsewhere", func(s *Spec) {
+			s.Volumes = []Volume{{Kind: VolumeSticky, Key: "docker", Mount: "/srv/docker"}}
+		}, true},
+		{"other key at docker mount ok", func(s *Spec) {
+			s.Volumes = []Volume{{Kind: VolumeSticky, Key: "docker-big", Mount: "/var/lib/docker"}}
+		}, false},
 		{"duplicate key", func(s *Spec) {
-			s.Volumes = []Volume{DockerVolume, {Kind: VolumeSticky, Key: "docker", Mount: "/x"}}
+			s.Volumes = []Volume{{Kind: VolumeSticky, Key: "c", Mount: "/x"}, {Kind: VolumeSticky, Key: "c", Mount: "/y"}}
 		}, true},
 		{"duplicate mount", func(s *Spec) {
 			s.Volumes = []Volume{DockerVolume, {Kind: VolumeSticky, Key: "d2", Mount: "/var/lib/docker"}}
