@@ -2,6 +2,7 @@ package cache
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -402,5 +405,121 @@ func TestDirStore(t *testing.T) {
 	}
 	if _, err := d.Put(ctx, "../escape", strings.NewReader("x")); err == nil {
 		t.Error("path traversal accepted")
+	}
+}
+
+// gateStore, once armed, pauses the next Put after it starts until release
+// is closed.
+type gateStore struct {
+	*MemStore
+	armed   atomic.Bool
+	started chan string
+	release chan struct{}
+}
+
+func (g *gateStore) Put(ctx context.Context, id string, r io.Reader) (int64, error) {
+	if g.armed.CompareAndSwap(true, false) {
+		g.started <- id
+		<-g.release
+	}
+	return g.MemStore.Put(ctx, id, r)
+}
+
+// An upload still being written can't be finalized or expired, and once
+// finalized no write can change the entry: otherwise a job could index a
+// tiny size and then stream bytes past the repo's quota.
+func TestFinalizeExcludesInFlightWrites(t *testing.T) {
+	for _, comp := range []string{"", "&comp=block&blockid=YmxvY2s%3D"} {
+		t.Run("comp="+comp, func(t *testing.T) {
+			h := newHarness(t, 1000)
+			now := time.Now()
+			var clock sync.Mutex
+			h.srv.Now = func() time.Time { clock.Lock(); defer clock.Unlock(); return now }
+			gate := &gateStore{MemStore: h.store, started: make(chan string, 1), release: make(chan struct{})}
+			h.srv.Store = gate
+			var release sync.Once
+			unblock := func() { release.Do(func() { close(gate.release) }) }
+			t.Cleanup(unblock) // don't strand the writer if a check fails
+			tok := h.token(prScope("7"))
+			c := h.ok(tok, "CreateCacheEntry", map[string]any{"key": "k", "version": "v1"})
+			url := c["signedUploadUrl"].(string)
+			if st := h.put(url, []byte("x"), nil); st != http.StatusCreated {
+				t.Fatalf("first put: %d", st)
+			}
+
+			gate.armed.Store(true)
+			done := make(chan int, 1)
+			go func() {
+				r, _ := http.NewRequest(http.MethodPut, url+comp, bytes.NewReader(make([]byte, 900)))
+				resp, err := http.DefaultClient.Do(r)
+				if err != nil {
+					done <- 0
+					return
+				}
+				resp.Body.Close()
+				done <- resp.StatusCode
+			}()
+			<-gate.started // the second PUT is writing
+
+			fin := map[string]any{"key": "k", "version": "v1", "size_bytes": "1"}
+			if out := h.ok(tok, "FinalizeCacheEntryUpload", fin); out["ok"] == true {
+				t.Fatalf("finalize during an in-flight write succeeded: %v", out)
+			}
+			// Nor does expiry sweep it out from under the writer.
+			clock.Lock()
+			now = now.Add(defaultPendingTTL + time.Minute)
+			clock.Unlock()
+			h.ok(tok, "CreateCacheEntry", map[string]any{"key": "other", "version": "v1"})
+			unblock()
+			if st := <-done; st != http.StatusCreated {
+				t.Fatalf("in-flight put: %d", st)
+			}
+
+			if comp == "" {
+				// The write finished: finalize now sees the real size.
+				if out := h.ok(tok, "FinalizeCacheEntryUpload", fin); out["ok"] == true {
+					t.Fatalf("finalize with stale size succeeded: %v", out)
+				}
+				if _, _, ok := h.restore(tok, "k"); ok {
+					t.Fatal("entry indexed despite size mismatch")
+				}
+			} else {
+				// The writer is done, so the next sweep removes the
+				// expired upload, including the late block.
+				h.ok(tok, "CreateCacheEntry", map[string]any{"key": "third", "version": "v1"})
+			}
+			if n := h.store.Len(); n != 0 {
+				t.Errorf("%d blobs left behind", n)
+			}
+			if u := h.srv.Index.Usage(repo); u != 0 {
+				t.Errorf("usage = %d", u)
+			}
+		})
+	}
+}
+
+// After finalize, the signed upload URL is closed.
+func TestNoWritesAfterFinalize(t *testing.T) {
+	h := newHarness(t, 1000)
+	tok := h.token(prScope("7"))
+	c := h.ok(tok, "CreateCacheEntry", map[string]any{"key": "k", "version": "v1"})
+	url := c["signedUploadUrl"].(string)
+	h.put(url, []byte("x"), nil)
+	if out := h.ok(tok, "FinalizeCacheEntryUpload", map[string]any{"key": "k", "version": "v1", "size_bytes": "1"}); out["ok"] != true {
+		t.Fatalf("finalize: %v", out)
+	}
+	for _, comp := range []string{"", "&comp=block&blockid=YmxvY2s%3D"} {
+		if st := h.put(url+comp, make([]byte, 900), nil); st != http.StatusConflict {
+			t.Errorf("put%s after finalize: %d", comp, st)
+		}
+	}
+	if b, _, ok := h.restore(tok, "k"); !ok || len(b) != 1 {
+		t.Fatalf("restore = %d bytes, %v", len(b), ok)
+	}
+	if u := h.srv.Index.Usage(repo); u != 1 {
+		t.Errorf("usage = %d", u)
+	}
+	if n := h.store.Len(); n != 1 {
+		t.Errorf("%d blobs, want 1", n)
 	}
 }

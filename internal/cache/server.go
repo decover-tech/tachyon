@@ -67,6 +67,11 @@ type upload struct {
 	version  string
 	created  time.Time
 	blocks   map[string]string // Azure block id -> staged blob id
+	// writers counts blob PUTs in flight. Finalize and expiry leave an
+	// upload alone while it has writers, and a PUT can only start while the
+	// upload is pending, so no write can land after the entry is
+	// finalized (or its bytes deleted).
+	writers int
 }
 
 // NewServer wires the index's eviction to blob deletion.
@@ -325,6 +330,13 @@ func (s *Server) finalize(ctx context.Context, sc Scope, key, version string, si
 	s.mu.Lock()
 	id, ok := s.byKey[sk]
 	if ok {
+		if u := s.pending[id]; u != nil && u.writers > 0 {
+			// Finalizing now would index a size the in-flight write is
+			// about to change. Leave the reservation; it expires if the
+			// job never finalizes.
+			s.mu.Unlock()
+			return finalizeResponse{Message: fmt.Sprintf("cache entry %q is still being uploaded", key)}, nil
+		}
 		delete(s.byKey, sk)
 		delete(s.pending, id)
 	}
@@ -416,7 +428,9 @@ func (s *Server) expirePending() {
 	var ids []string
 	s.mu.Lock()
 	for id, u := range s.pending {
-		if u.created.Before(cutoff) {
+		// An upload with a PUT in flight is swept on a later pass, so the
+		// write can't recreate bytes after they are deleted.
+		if u.created.Before(cutoff) && u.writers == 0 {
 			stale = append(stale, u)
 			ids = append(ids, id)
 			delete(s.pending, id)
@@ -464,11 +478,19 @@ func (s *Server) servePut(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	u := s.pending[id]
+	if u != nil {
+		u.writers++
+	}
 	s.mu.Unlock()
 	if u == nil {
 		http.Error(w, "upload is not open", http.StatusConflict)
 		return
 	}
+	defer func() {
+		s.mu.Lock()
+		u.writers--
+		s.mu.Unlock()
+	}()
 	limit := s.Index.quota(u.scope.Repo)
 	if limit <= 0 {
 		limit = DefaultQuotaBytes
