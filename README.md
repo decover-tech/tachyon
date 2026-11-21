@@ -14,12 +14,14 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `hostd/` | Rust | `tachyon-hostd`: warm VM pool, copy-on-write job disks (ZFS), per-VM jailer, Cloud Hypervisor control, sticky-volume promotion, prebuild snapshots |
 | `cmd/tachyon-controlplane/` | Go | Serves GitHub webhooks (HTTP) and the host link (gRPC). In-memory state for now |
 | `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key` |
+| `cmd/tachyon-guest/` | Go | Guest agent inside each job VM: takes the job payload from hostd over vsock (port 1024), mounts disks, runs the GitHub runner or prebuild warm steps, reports back and powers off. Linux only |
 | `internal/jobapi/` | Go | Platform-neutral job spec. Nothing below it knows about GitHub |
 | `internal/frontend/github/` | Go | GitHub Actions adapter: labels, trust derivation, webhook verification, repo-scoped JIT runners, reconcile loop, minimal App REST client |
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
 | `internal/scheduler/` | Go | Placement by prebuild locality, packing by measured usage, CPU oversubscription with automatic step-back, deferrable class |
 | `internal/prebuild/` | Go | `.tachyon/prebuild.yml`, prebuild keys, full/partial/none fork planning, credential scrub list |
 | `internal/cache/` | Go | Actions cache scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction |
+| `internal/guest/` | Go | The guest agent's logic and its vsock wire format (golden files shared with hostd's tests), behind a `System` interface so it tests without a VM |
 | `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
 | `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
