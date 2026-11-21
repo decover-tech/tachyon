@@ -55,6 +55,14 @@ type Core struct {
 	CacheURL  string
 	Log       *slog.Logger
 	Now       func() time.Time
+	// MaxDeferral bounds how long a deferrable job waits for a quiet
+	// fleet; past it the job is placed anyway (or spilled to burst).
+	// Default DefaultMaxDeferral. The job starts within MaxDeferral plus
+	// one RetryDeferred interval.
+	MaxDeferral time.Duration
+	// OffPeak, if set, measures the off-peak class's utilization gain and
+	// deferral waits.
+	OffPeak *telemetry.OffPeak
 
 	mu       sync.Mutex
 	hosts    map[string]*hostConn
@@ -69,6 +77,17 @@ type hintEntry struct {
 }
 
 const hintTTL = 30 * time.Minute
+
+// DefaultMaxDeferral is the agreed start bound for the deferrable class.
+// It is well inside the 24 hours GitHub keeps a self-hosted job queued.
+const DefaultMaxDeferral = 6 * time.Hour
+
+func (c *Core) maxDeferral() time.Duration {
+	if c.MaxDeferral > 0 {
+		return c.MaxDeferral
+	}
+	return DefaultMaxDeferral
+}
 
 var _ jobapi.Core = (*Core)(nil)
 
@@ -135,9 +154,14 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
+	if sub.QueuedAt.IsZero() {
+		sub.QueuedAt = c.now()
+	}
+	overdue := sub.Deferrable && c.now().Sub(sub.QueuedAt) >= c.maxDeferral()
 
 	rec := telemetry.NewRecord(spec.JobID)
 	rec.Tenant, rec.Repo, rec.VCPU = spec.Tenant, spec.Repo, spec.Hardware.VCPU
+	rec.Deferrable = sub.Deferrable
 	rec.Mark(telemetry.WebhookReceived, sub.QueuedAt)
 
 	c.mu.Lock()
@@ -148,9 +172,16 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	c.records[spec.JobID] = rec
 	c.mu.Unlock()
 
-	a, err := c.Scheduler.Place(sub)
+	place := c.Scheduler.Place
+	if overdue {
+		place = c.Scheduler.PlaceOverdue
+	}
+	a, err := place(sub)
 	switch {
-	case errors.Is(err, scheduler.ErrDeferred):
+	case errors.Is(err, scheduler.ErrDeferred),
+		// Within its bound, a deferrable job waits for owned capacity
+		// rather than paying for burst.
+		sub.Deferrable && !overdue && errors.Is(err, scheduler.ErrNoCapacity):
 		c.mu.Lock()
 		c.deferred = append(c.deferred, sub)
 		c.mu.Unlock()
@@ -160,7 +191,11 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		if c.Burst == nil {
 			return err
 		}
-		return c.Burst.Submit(ctx, sub)
+		if err := c.Burst.Submit(ctx, sub); err != nil {
+			return err
+		}
+		c.offPeakStarted(sub, overdue)
+		return nil
 	case err != nil:
 		return err
 	}
@@ -182,11 +217,21 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		return fmt.Errorf("host %s not connected", a.HostID)
 	}
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
+	c.offPeakStarted(sub, overdue)
 	return nil
 }
 
-// RetryDeferred re-submits deferred jobs; call it periodically.
+func (c *Core) offPeakStarted(sub jobapi.Submission, overdue bool) {
+	if sub.Deferrable && c.OffPeak != nil {
+		c.OffPeak.Started(c.now().Sub(sub.QueuedAt), overdue)
+	}
+}
+
+// RetryDeferred re-submits deferred jobs, oldest first, and samples fleet
+// utilization for the off-peak meter; call it periodically. Jobs past
+// MaxDeferral are placed even if the fleet is busy.
 func (c *Core) RetryDeferred(ctx context.Context) {
+	defer c.sampleOffPeak()
 	c.mu.Lock()
 	pending := c.deferred
 	c.deferred = nil
@@ -298,6 +343,13 @@ func shortRepo(repo string) string {
 		return repo[i+1:]
 	}
 	return repo
+}
+
+func (c *Core) sampleOffPeak() {
+	if c.OffPeak != nil {
+		total, def := c.Scheduler.UtilizationSplit()
+		c.OffPeak.Sample(c.now(), total, def)
+	}
 }
 
 // Record returns a job's telemetry record.

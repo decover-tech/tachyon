@@ -23,6 +23,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/scheduler"
+	"github.com/decover-tech/tachyon/internal/telemetry"
 )
 
 func main() {
@@ -35,6 +36,7 @@ func main() {
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
+	maxDeferral := flag.Duration("max-deferral", controlplane.DefaultMaxDeferral, "longest a tachyon-deferrable job waits for a quiet fleet")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -69,6 +71,9 @@ func main() {
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
 		Log:       log,
+
+		MaxDeferral: *maxDeferral,
+		OffPeak:     &telemetry.OffPeak{},
 	}
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
@@ -97,6 +102,8 @@ func main() {
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
+		report := time.NewTicker(time.Hour)
+		defer report.Stop()
 		for {
 			select {
 			case <-ctx.Done():
@@ -104,6 +111,11 @@ func main() {
 			case <-t.C:
 				adapter.Reconcile(ctx)
 				core.RetryDeferred(ctx)
+			case <-report.C:
+				r := core.OffPeak.Report()
+				log.Info("off-peak class", "window", r.Window, "avg_util", r.AvgUtil, "base_util", r.AvgBaseUtil,
+					"gain", r.Gain, "relative_gain", r.RelativeGain, "started", r.Started, "overdue", r.Overdue,
+					"p95_wait", r.P95Wait, "max_wait", r.MaxWait)
 			}
 		}
 	}()
