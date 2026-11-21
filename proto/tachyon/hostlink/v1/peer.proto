@@ -1,0 +1,32 @@
+// Host-to-host snapshot transfer. Both ends are tachyon-hostd; the control
+// plane only brokers each transfer (PullSnapshot to the receiver,
+// ServeSnapshot with the same single-use token to the sender).
+syntax = "proto3";
+
+package tachyon.hostlink.v1;
+
+option go_package = "github.com/decover-tech/tachyon/gen/hostlink/v1;hostlinkv1";
+
+import "tachyon/hostlink/v1/hostlink.proto";
+
+service PeerSnapshotService {
+  // Streams the snapshot: a zfs send stream (incremental from the newest
+  // snapshot in `have` the sender can use) or, for base images, the file.
+  rpc FetchSnapshot(FetchSnapshotRequest) returns (stream FetchSnapshotResponse);
+}
+
+message FetchSnapshotRequest {
+  SnapshotRef snapshot = 1;
+  string token = 2;
+  // The pulling host; must match the grant.
+  string host_id = 3;
+  // Snapshot ids the receiver already holds, candidates for an incremental base.
+  repeated string have = 4;
+}
+
+message FetchSnapshotResponse {
+  bytes data = 1;
+  // Set on the first message: the base snapshot of an incremental stream,
+  // empty for a full stream.
+  string incremental_from = 2;
+}

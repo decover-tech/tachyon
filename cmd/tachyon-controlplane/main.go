@@ -104,6 +104,7 @@ func main() {
 			case <-t.C:
 				adapter.Reconcile(ctx)
 				core.RetryDeferred(ctx)
+				core.ReconcileReplicas()
 			}
 		}
 	}()

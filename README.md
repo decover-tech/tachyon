@@ -77,6 +77,8 @@ Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9
 | `TACHYON_FAILURE_DOMAIN`, `TACHYON_ARCH` | no | `default`, `x86_64` |
 | `TACHYON_CH_BINARY`, `TACHYON_CH_REMOTE` | no | `/usr/local/bin/cloud-hypervisor`, `/usr/local/bin/ch-remote` |
 | `TACHYON_RUN_DIR`, `TACHYON_CGROUP`, `TACHYON_BASE_UID` | no | `/run/tachyon/vms`, `/sys/fs/cgroup/tachyon`, `100000` |
+| `TACHYON_PEER_ADDRESS` | no | address peers use to pull snapshots from this host, e.g. `http://h1.internal:7443`; unset = serve no pulls |
+| `TACHYON_PEER_LISTEN`, `TACHYON_IMAGES_DIR` | no | `0.0.0.0:7443`, `/var/lib/tachyon/images` (base images as `<name@version>.img`) |
 
 ## Status
 

@@ -52,7 +52,7 @@ pub struct Zfs<R: CommandRunner> {
     pub runner: R,
 }
 
-fn check_id(id: &str) -> Result<()> {
+pub(crate) fn check_id(id: &str) -> Result<()> {
     let ok = !id.is_empty()
         && !id.contains("..")
         && !id.starts_with('/')

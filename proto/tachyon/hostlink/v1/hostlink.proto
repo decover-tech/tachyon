@@ -39,6 +39,9 @@ message Hello {
   string hostd_version = 7;
   // Jobs still running from before a reconnect.
   repeated string running_job_ids = 8;
+  // Where peers reach this host's PeerSnapshotService (peer.proto); empty
+  // means the host serves no snapshot pulls.
+  string peer_address = 9;
 }
 
 message Heartbeat {
@@ -113,6 +116,7 @@ message LinkResponse {
     CancelJob cancel = 3;
     Drain drain = 4;
     PullSnapshot pull_snapshot = 5;
+    ServeSnapshot serve_snapshot = 6;
   }
 }
 
@@ -189,4 +193,16 @@ message PullSnapshot {
   SnapshotRef snapshot = 1;
   string from_host_id = 2;
   string from_address = 3;
+  // Single-use pull grant; the peer was sent the same token in a
+  // ServeSnapshot and refuses the pull without it.
+  string token = 4;
+}
+
+// Lets one peer pull a snapshot from this host: the authorization half of a
+// PullSnapshot. Grants are single-use and expire.
+message ServeSnapshot {
+  string token = 1;
+  string snapshot_id = 2;
+  string to_host_id = 3;
+  google.protobuf.Timestamp expires_at = 4;
 }
