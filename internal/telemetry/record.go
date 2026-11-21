@@ -38,6 +38,8 @@ type Record struct {
 	steps     []Step
 	cacheHits int
 	cacheMiss int
+
+	prebuildBuild bool
 }
 
 type Step struct {
@@ -101,3 +103,28 @@ func (r *Record) Billable() (time.Duration, bool) {
 	}
 	return d.Round(time.Second), true
 }
+
+// CacheCounts returns the job's cache hits and misses.
+func (r *Record) CacheCounts() (hits, misses int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cacheHits, r.cacheMiss
+}
+
+// MarkPrebuildBuild flags the job as a prebuild build. Its run time is the
+// warm-up baseline for the "minutes saved" report.
+func (r *Record) MarkPrebuildBuild() {
+	r.mu.Lock()
+	r.prebuildBuild = true
+	r.mu.Unlock()
+}
+
+// IsPrebuildBuild reports whether the job built a prebuild.
+func (r *Record) IsPrebuildBuild() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prebuildBuild
+}
+
+// Run is job started to job finished: the time the job's own steps took.
+func (r *Record) Run() (time.Duration, bool) { return r.between(JobStarted, JobFinished) }

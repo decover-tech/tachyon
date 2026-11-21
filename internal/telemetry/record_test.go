@@ -32,3 +32,29 @@ func TestPickupAndBillable(t *testing.T) {
 		t.Error("At")
 	}
 }
+
+func TestCacheCountsPrebuildBuildAndRun(t *testing.T) {
+	t0 := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	r := NewRecord("j")
+	r.CacheResult(true)
+	r.CacheResult(true)
+	r.CacheResult(false)
+	if h, m := r.CacheCounts(); h != 2 || m != 1 {
+		t.Fatalf("CacheCounts = %d %d", h, m)
+	}
+	if r.IsPrebuildBuild() {
+		t.Fatal("new record is not a prebuild build")
+	}
+	r.MarkPrebuildBuild()
+	if !r.IsPrebuildBuild() {
+		t.Fatal("MarkPrebuildBuild")
+	}
+	if _, ok := r.Run(); ok {
+		t.Fatal("run without phases")
+	}
+	r.Mark(JobStarted, t0)
+	r.Mark(JobFinished, t0.Add(3*time.Minute))
+	if d, ok := r.Run(); !ok || d != 3*time.Minute {
+		t.Fatalf("Run = %v %v", d, ok)
+	}
+}
