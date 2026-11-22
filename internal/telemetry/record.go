@@ -28,6 +28,7 @@ type Record struct {
 	VCPU          int
 	PrebuildMatch string // full | partial | none
 	Burst         bool   // ran on burst rather than owned capacity
+	Prebuild      bool   // built a prebuild snapshot; billed against the repo's allowance
 
 	// Deferrable jobs ran in the discounted off-peak class. Their pickup
 	// includes time spent deferred, so fleet pickup SLOs exclude them.

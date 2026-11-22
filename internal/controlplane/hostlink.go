@@ -181,6 +181,7 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 		usage = &scheduler.Usage{CPU: r.GetAvgBusyVcpu(), MemGB: r.GetPeakMemoryGb()}
 	}
 	c.Scheduler.Release(r.GetJobId(), usage)
+	c.meterJob(r)
 	if pb := r.GetPrebuild(); pb != nil && pb.GetKey() != "" {
 		if rec := c.Record(r.GetJobId()); rec != nil {
 			rec.MarkPrebuildBuild()
@@ -195,6 +196,32 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 		})
 	}
 	c.log().Info("job finished", "job", r.GetJobId(), "host", hc.id, "outcome", r.GetOutcome().String())
+}
+
+// Meter receives each finished job's telemetry record; billing.Meter
+// implements it.
+type Meter interface {
+	RecordJob(rec *telemetry.Record) error
+}
+
+// meterJob bills a finished job from its telemetry record. A result means
+// the job is over, so JobFinished is marked now if hostd did not report
+// that phase (the first mark wins, so a reported time is kept).
+func (c *Core) meterJob(r *hostlinkv1.JobResult) {
+	rec := c.Record(r.GetJobId())
+	if rec == nil {
+		return
+	}
+	if pb := r.GetPrebuild(); pb != nil && pb.GetKey() != "" {
+		rec.Prebuild = true
+	}
+	rec.Mark(telemetry.JobFinished, c.now())
+	if c.Meter == nil {
+		return
+	}
+	if err := c.Meter.RecordJob(rec); err != nil {
+		c.log().Warn("job not metered", "job", rec.JobID, "err", err)
+	}
 }
 
 // hostSnapshot finds the prebuild snapshot for repo on a host.
