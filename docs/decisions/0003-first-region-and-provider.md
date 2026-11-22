@@ -29,10 +29,12 @@ GbE. Issue #6 lists Hetzner, Latitude.sh and OVHcloud as candidates.
    7950X3D with DDR5 ECC in the AX102, EPYC 9454P in the AX162), its
    dedicated servers exist only in Germany and Finland, and 10G is an
    add-on with a 20 TB egress cap.
-4. **Region: see the conditional table below. It depends on where the pilots
-   are and we do not know that.** Default to US-East (Ashburn or New York) if
-   no pilot data arrives, since GitHub's runner traffic and most CI
-   customers are US-centric. This default is a guess, not a finding.
+4. **Region: US-West, with Los Angeles first.** The maintainers have
+   confirmed the pilot is in California, which settles the open input below.
+   Latitude.sh lists a Los Angeles location (per an aggregator; which of its
+   4004/4005 plans is offered there is UNVERIFIED and must be confirmed
+   before ordering). OVHcloud's US-West site is Hillsboro, Oregon, which is
+   the fallback if Latitude.sh Los Angeles has no suitable plan.
 
 If sign-off is slow, the work in issue #35 can start with the checklist at
 the end: account, KYC and quota steps take days and do not depend on the
@@ -40,14 +42,14 @@ final provider.
 
 ## Region, conditional on pilot locations (open input)
 
-**Open input for the maintainers:** where are the first 3 to 5 pilot
-customers' people, repos and artifact registries? Decover is a possible
-pilot, but its location is not assumed here.
+**Input received:** the pilot is in California, so the row to follow is
+US-West. The other rows are kept in case the pilot set widens. Decover's own
+location was not stated beyond this and is not assumed.
 
 | If the pilots are mostly... | Then pick | Candidates with that metro (per the sources below) |
 | --- | --- | --- |
 | US-East | Ashburn VA or New York | Latitude.sh (Ashburn, New York per aggregator list, UNVERIFIED per plan); OVHcloud Vint Hill VA (Advance) |
-| US-West | Los Angeles or Hillsboro OR | Latitude.sh (Los Angeles, UNVERIFIED per plan); OVHcloud Hillsboro (Advance) |
+| **US-West (selected: California pilot)** | Los Angeles first, Hillsboro OR as fallback | Latitude.sh (Los Angeles, UNVERIFIED per plan); OVHcloud Hillsboro (Advance) |
 | EU | Frankfurt, or Falkenstein/Nuremberg for Hetzner | Latitude.sh Frankfurt, Amsterdam, London; Hetzner DE/FI; OVHcloud Gravelines, Roubaix, Strasbourg, Limburg, Warsaw, Erith (UK) |
 | Mixed US and EU | US-East first, EU as the second region | The architecture already plans EU data residency as the second region |
 | Latin America or Asia-Pacific | Latitude.sh only among the three (Sao Paulo, Singapore, Tokyo, Sydney per aggregator list) | UNVERIFIED |
@@ -193,15 +195,15 @@ on documented ECC, but only for EU.
   migration of the base image and prebuild cache.
 - **Single provider, single region.** The reliability section expects
   overflow to the next region. A one-region start has no spill target; the
-  second region should be a different provider or metro.
+  second region should be a different provider or metro. With a California first region, Hillsboro OR (OVHcloud) or a second Latitude.sh metro such as Dallas (per the aggregator list, UNVERIFIED) are the natural candidates.
 
 ## What would change the decision
 
-- Pilot customers are mostly in the EU: Hetzner (AX102 for cost) or
+- Pilot customers turn out to be mostly outside the US West Coast (the pilot is in California today). For the EU: Hetzner (AX102 for cost) or
   Latitude.sh Frankfurt moves up, and OVHcloud Gravelines or Limburg is the
   price option.
 - Latitude.sh cannot confirm ECC or a setup fee and deploy time within a
-  week: choose OVHcloud Advance (EU or Vint Hill) or Hetzner.
+  week: choose OVHcloud Advance (Hillsboro OR for a California pilot) or Hetzner (EU only for dedicated, so a poor fit for this pilot).
 - OVHcloud confirms full ECC DIMMs and a public port above 3 Gbps: it
   becomes the cheaper first choice.
 - A provider's terms exclude running customers' untrusted code: remove it.
