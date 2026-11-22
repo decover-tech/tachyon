@@ -296,6 +296,19 @@ func main() {
 			},
 		}
 	}
+	// Opt-in features request extra App permissions; enable them on the
+	// client only when their flags are set, so a default deployment's
+	// installation tokens stay at the base least-privilege set.
+	if adapter.RerunInfra != nil {
+		ghClient.Features = append(ghClient.Features, github.FeatureInfraRerun)
+	}
+	if adapter.Nightly != nil {
+		ghClient.Features = append(ghClient.Features, github.FeatureNightly)
+	}
+	if len(ghClient.Features) > 0 {
+		log.Info("GitHub opt-in features enabled; the App registration must grant their permissions",
+			"features", ghClient.Features, "permissions", github.PermissionsFor(ghClient.Features...))
+	}
 	if db != nil {
 		core.Store, adapter.Store = db, db
 		st, err := core.Restore(ctx)

@@ -37,7 +37,7 @@ func TestClientRateLimitHeadersAndRerun(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	c := &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL}
+	c := &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL, Features: []Feature{FeatureInfraRerun}}
 	ctx := context.Background()
 
 	if err := c.RerunJob(ctx, 42, "acme/api", 1); err != nil {

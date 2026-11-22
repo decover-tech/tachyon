@@ -362,7 +362,7 @@ func TestClientNightlyEndpoints(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	c := &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL}
+	c := &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL, Features: []Feature{FeatureNightly}}
 	ctx := context.Background()
 	if err := c.RerunWorkflow(ctx, 42, "acme/api", 77); err != nil || !rerun {
 		t.Fatalf("RerunWorkflow: err=%v authed=%v", err, rerun)

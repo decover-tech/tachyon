@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +29,10 @@ type Client struct {
 	PrivateKey *rsa.PrivateKey
 	BaseURL    string // default https://api.github.com
 	HTTP       *http.Client
+	// Features are the opt-in features this deployment uses. Installation
+	// tokens are scoped to PermissionsFor(Features...), and calls that belong
+	// to a feature that is not listed are refused before any request is made.
+	Features []Feature
 
 	mu     sync.Mutex
 	tokens map[int64]installationToken
@@ -108,13 +113,15 @@ func (c *Client) installationToken(ctx context.Context, inst int64) (string, err
 		ExpiresAt   time.Time         `json:"expires_at"`
 		Permissions map[string]string `json:"permissions"`
 	}
-	// Scope the token to exactly the App's least-privilege set, so it never
-	// carries more even if the App registration drifts.
-	body := map[string]any{"permissions": AppPermissions}
+	// Scope the token to exactly the App's least-privilege set (plus the
+	// enabled features'), so it never carries more even if the App
+	// registration drifts.
+	allowed := PermissionsFor(c.Features...)
+	body := map[string]any{"permissions": allowed}
 	if err := c.do(ctx, "Bearer "+jwt, http.MethodPost, fmt.Sprintf("/app/installations/%d/access_tokens", inst), body, &out); err != nil {
 		return "", fmt.Errorf("installation token: %w", err)
 	}
-	if err := CheckGranted(out.Permissions); err != nil {
+	if err := CheckGrantedWithin(out.Permissions, allowed); err != nil {
 		return "", fmt.Errorf("installation %d: %w", inst, err)
 	}
 	c.mu.Lock()
@@ -200,7 +207,14 @@ func (c *Client) do(ctx context.Context, auth, method, path string, body, out an
 	return nil
 }
 
+// ErrFeatureDisabled is returned for a call that belongs to an opt-in
+// feature the client was not configured with.
+var ErrFeatureDisabled = errors.New("github: feature not enabled for this client")
+
 func (c *Client) asInstallation(ctx context.Context, inst int64, method, path string, body, out any) error {
+	if _, f, ok := lookupEndpoint(method, path); ok && f != "" && !slices.Contains(c.Features, f) {
+		return fmt.Errorf("%w: %s %s needs feature %q", ErrFeatureDisabled, method, path, f)
+	}
 	tok, err := c.installationToken(ctx, inst)
 	if err != nil {
 		return err

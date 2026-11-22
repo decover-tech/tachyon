@@ -35,6 +35,24 @@ Every call the control plane makes:
 
 Each installation token is requested with exactly the App's permissions. The control plane rejects a token whose permissions reach beyond them, so the token stays least-privilege even if someone widens the App's registration by hand in GitHub's settings.
 
+## Optional features and their extra permissions
+
+Two features call GitHub endpoints that the base permissions do not cover. They are off by default. A deployment that does not turn one on neither registers nor requests its permissions, and the client refuses to make its calls (`ErrFeatureDisabled`), so the base App stays exactly at the least-privilege set above.
+
+| Feature | Control plane flag | Extra repository permissions | Calls |
+| --- | --- | --- | --- |
+| `infra-rerun` | `-github-rerun-infra <installation IDs>` | Actions: write | `POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun` |
+| `nightly` | `-nightly-repos owner/name,...` | Actions: write, Checks: write | `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun`, `POST /repos/{owner}/{repo}/check-runs` |
+
+To use one, register (or update) the App with its permissions, then start the control plane with the matching flag. The flag also widens the installation tokens to match, and the control plane logs which features are on:
+
+```sh
+bin/tachyon github-app manifest -webhook-url https://<control-plane-host>/webhooks/github \
+  -public -features nightly > manifest.json     # -features infra-rerun,nightly for both
+```
+
+Turning a feature on later means changing the registered App's permissions, and each installation must approve them (see "Changing permissions later"). Until an installation approves, token requests for it fail. For a first pilot, leave both features off.
+
 ## Registering the App (Tachyon operators)
 
 Register the App once, under the Tachyon GitHub organization, using GitHub's [manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest). The manifest flow sets the permissions and events from code, so they can't be mistyped in the settings UI.
@@ -83,7 +101,7 @@ Register the App once, under the Tachyon GitHub organization, using GitHub's [ma
 
 ### Changing permissions later
 
-Edit `AppPermissions` and `AppEvents`, extend `Endpoints`, and update this page. Then change the registered App to match in its settings. GitHub asks each installation to approve the new permissions. Until an org approves, token requests for that installation fail, because the control plane asks for the full set, and that installation's jobs stay queued. Tell pilot orgs before shipping a permission change.
+Edit `AppPermissions` and `AppEvents` (or `FeaturePermissions` for an opt-in feature), extend `Endpoints` (or `FeatureEndpoints`), and update this page. Then change the registered App to match in its settings. GitHub asks each installation to approve the new permissions. Until an org approves, token requests for that installation fail, because the control plane asks for the full set, and that installation's jobs stay queued. Tell pilot orgs before shipping a permission change.
 
 ## Installing it (pilot orgs)
 
@@ -100,3 +118,13 @@ Notes for the pilot org:
 - Pull requests from forks run as `untrusted-fork`: they can read prebuilds and caches, but never write prebuilds, sticky volumes or shared cache entries. Self-hosted runners on public repositories still deserve care, so we recommend private repositories for the pilot.
 - **Adding repositories:** *Organization settings → GitHub Apps → Tachyon → Configure → Repository access*.
 - **Removing Tachyon:** uninstall the App from the same page. Tachyon loses API access at once, so any runner registered at that moment can't be cleaned up by Tachyon. Remove leftovers under the repository's *Settings → Actions → Runners*.
+
+## First pilot checklist (what only a person can do)
+
+The code and tests cannot register the App or install it. Someone with the right GitHub access does these steps once, in order:
+
+1. **Register** (an owner of the `decover-tech` org): run the `bin/tachyon github-app manifest` command from "Registering the App" with the control plane's real HTTPS webhook URL, submit it in the browser, exchange the code, and store the private key and webhook secret in the key store. Do not pass `-features` for the first pilot.
+2. **Start the control plane** with the App id, key, webhook secret and `-github-allowed-owners decover-tech` (the pilot org's login).
+3. **Verify the registration** as in step 5 of the registration section: repository permissions are exactly the table above, no organization or account permissions, events are `push` and `workflow_job`, and the webhook `ping` returns HTTP 202.
+4. **Install** the App on the pilot org, restricted to one or two repositories to start.
+5. **Change `runs-on`** in one workflow to a Tachyon label such as `tachyon-ubuntu-24.04-8x` and push. The job should be picked up by a runner named `tachyon-...`. Jobs only run once hosts are provisioned and a base image is live, which are separate pieces of work (issues #35 and #14).
