@@ -85,6 +85,8 @@ TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
 
 Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090` over mutual TLS, and each host must present a certificate for its own `TACHYON_HOST_ID`. `tachyon hostcert` issues development certificates; issuance and rotation are in [docs/hostlink-mtls.md](docs/hostlink-mtls.md). Pass `-hostlink-insecure` (and `TACHYON_HOSTLINK_INSECURE=1` to hostd) to run without TLS locally.
 
+Set `TACHYON_DATABASE_URL` (e.g. `postgres://tachyon@db:5432/tachyon`) to keep jobs, pending runners, hosts, the prebuild registry and job records in Postgres; migrations run on start. After a restart, queued jobs are resubmitted and jobs running on hosts keep their reservations until the hosts reconnect and report results. Without it, state is in memory. The Postgres store tests run when `TACHYON_TEST_POSTGRES_DSN` is set.
+
 ### Running hostd (Linux host)
 
 | Variable | Required | Default |
@@ -124,7 +126,7 @@ Not built yet:
 - **Base image pipeline, the parts that need real infrastructure.** The pipeline (build plan, `build.sh`, signing, SBOM, rollout, per-size snapshot builder) exists, but no image has been built on a real builder or booted under Cloud Hypervisor yet, there is no image store to push images to hosts, and hostd still restores every VM from the single `TACHYON_BASE_SNAPSHOTS` version rather than the version a job is assigned. Builds are not yet byte-reproducible: some upstream install scripts download "latest" artifacts outside apt.
 - **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
-- **Persistence.** The control plane keeps all state in memory, and secrets need a managed key store.
+- **Secrets persistence.** Control plane state is in Postgres, but secrets (JIT runner configs) are still in memory until a managed key store lands; after a restart, jobs whose JIT config was lost are re-dispatched by the adapter's reconcile loop.
 - **Host certificate issuer** backed by the key store, and on-host renewal. mTLS and host identity checks on the host link are built; only the `tachyon hostcert` development issuer exists.
 - **Observability export** (OpenTelemetry/Prometheus/ClickHouse) and billing.
 

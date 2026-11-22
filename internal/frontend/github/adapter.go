@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/decover-tech/tachyon/internal/jobapi"
+	"github.com/decover-tech/tachyon/internal/store"
 )
 
 const maxWebhookBytes = 5 << 20
@@ -33,6 +34,10 @@ type Adapter struct {
 	ReconcileAfter time.Duration
 	// MaxAttempts bounds retries of one job.
 	MaxAttempts int
+	// Store, if set, persists pending and active runners so a restart
+	// keeps retrying queued jobs and doesn't sweep live runners
+	// (see persist.go).
+	Store store.Store
 
 	mu      sync.Mutex
 	core    jobapi.Core
@@ -42,6 +47,7 @@ type Adapter struct {
 }
 
 type pendingJob struct {
+	id             int64 // GitHub job ID
 	installationID int64
 	repo           string
 	labels         []string
@@ -216,16 +222,20 @@ func (a *Adapter) onWorkflowJob(ctx context.Context, e workflowJobEvent) error {
 		delete(a.pending, j.ID)
 		a.active[j.RunnerName] = true
 		a.mu.Unlock()
+		a.forgetPending(ctx, j.ID)
+		a.saveActive(ctx, j.RunnerName, e.Installation.ID, e.Repository.FullName)
 	case "completed":
 		a.mu.Lock()
 		if p, ok := a.pending[j.ID]; ok { // cancelled before it started
 			delete(a.pending, j.ID)
 			a.mu.Unlock()
+			a.forgetPending(ctx, j.ID)
 			a.cleanupRunner(ctx, p)
 			return nil
 		}
 		delete(a.active, j.RunnerName)
 		a.mu.Unlock()
+		a.forgetActive(ctx, j.RunnerName)
 	}
 	return nil
 }
@@ -239,7 +249,7 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 		a.mu.Unlock()
 		return nil
 	}
-	p := &pendingJob{installationID: e.Installation.ID, repo: e.Repository.FullName, labels: j.Labels}
+	p := &pendingJob{id: j.ID, installationID: e.Installation.ID, repo: e.Repository.FullName, labels: j.Labels}
 	a.pending[j.ID] = p
 	a.repos[p.repo] = p.installationID
 	a.mu.Unlock()
@@ -247,10 +257,14 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 	defer func() {
 		if !ok {
 			a.mu.Lock()
-			if a.pending[j.ID] == p {
+			mine := a.pending[j.ID] == p
+			if mine {
 				delete(a.pending, j.ID)
 			}
 			a.mu.Unlock()
+			if mine {
+				a.forgetPending(ctx, j.ID)
+			}
 		}
 	}()
 
@@ -315,6 +329,12 @@ func (a *Adapter) dispatch(ctx context.Context, p *pendingJob) error {
 	p.runnerID, p.secretRef = jit.RunnerID, ref
 	p.sub.Spec.Bootstrap = jobapi.Bootstrap{Kind: jobapi.BootstrapGitHubRunner, JITConfig: ref}
 	p.submittedAt = a.now()
+	// Recorded before submitting, so a restart can't orphan a runner the
+	// core already knows about.
+	if err := a.savePending(ctx, p); err != nil {
+		a.cleanupRunner(ctx, p)
+		return fmt.Errorf("persist pending runner: %w", err)
+	}
 	a.mu.Lock()
 	core := a.core
 	a.mu.Unlock()
@@ -430,6 +450,7 @@ func (a *Adapter) Reconcile(ctx context.Context) {
 			a.mu.Lock()
 			delete(a.pending, staleIDs[i])
 			a.mu.Unlock()
+			a.forgetPending(ctx, staleIDs[i])
 			continue
 		}
 		if err := a.dispatch(ctx, p); err != nil {

@@ -19,6 +19,8 @@ var (
 	ErrNoCapacity = errors.New("no owned capacity")
 	// ErrDeferred means a deferrable job should wait for a quieter fleet.
 	ErrDeferred = errors.New("deferred until the fleet is quiet")
+	// ErrAlreadyPlaced means the job ID already holds a reservation.
+	ErrAlreadyPlaced = errors.New("already placed")
 )
 
 // Host is the scheduler's view of one host, refreshed by heartbeats.
@@ -138,6 +140,14 @@ func (s *Scheduler) demand(sub jobapi.Submission) (cpu, mem float64) {
 	return cpu, mem
 }
 
+// Placed reports whether the job holds a reservation.
+func (s *Scheduler) Placed(jobID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.allocs[jobID]
+	return ok
+}
+
 // Place chooses a host and reserves capacity for the job. A deferrable job
 // gets ErrDeferred while the fleet is busy.
 func (s *Scheduler) Place(sub jobapi.Submission) (Assignment, error) {
@@ -156,7 +166,7 @@ func (s *Scheduler) place(sub jobapi.Submission, gate bool) (Assignment, error) 
 	defer s.mu.Unlock()
 	spec := sub.Spec
 	if _, dup := s.allocs[spec.JobID]; dup {
-		return Assignment{}, fmt.Errorf("job %s already placed", spec.JobID)
+		return Assignment{}, fmt.Errorf("job %s: %w", spec.JobID, ErrAlreadyPlaced)
 	}
 	if sub.Deferrable && gate {
 		threshold := s.DeferBelowUtil

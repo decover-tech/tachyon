@@ -17,6 +17,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/scheduler"
+	"github.com/decover-tech/tachyon/internal/store"
 	"github.com/decover-tech/tachyon/internal/telemetry"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -80,6 +81,8 @@ type Core struct {
 	// OffPeak, if set, measures the off-peak class's utilization gain and
 	// deferral waits.
 	OffPeak *telemetry.OffPeak
+	// Store, if set, persists jobs, hosts and job records (see persist.go).
+	Store store.Store
 
 	mu       sync.Mutex
 	hosts    map[string]*hostConn
@@ -87,6 +90,9 @@ type Core struct {
 	deferred []jobapi.Submission
 	records  map[string]*telemetry.Record
 	repl     replication // snapshot pulls in flight (replication.go)
+	// inflight holds the IDs of jobs a Submit call is working on, so a
+	// duplicate submission of the same ID can't race it.
+	inflight map[string]bool
 }
 
 type hintEntry struct {
@@ -132,6 +138,7 @@ func (c *Core) init() {
 		c.hosts = map[string]*hostConn{}
 		c.hints = map[string]hintEntry{}
 		c.records = map[string]*telemetry.Record{}
+		c.inflight = map[string]bool{}
 	}
 }
 
@@ -190,11 +197,35 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 
 	c.mu.Lock()
 	c.init()
+	// A job ID that is already being submitted, waiting in the deferred
+	// queue or holding a reservation is a duplicate (the frontend's
+	// reconcile re-dispatches jobs that look stuck). Submitting it again
+	// would overwrite the persisted row of a job that may be running.
+	if c.inflight[spec.JobID] || c.deferredLocked(spec.JobID) || c.Scheduler.Placed(spec.JobID) {
+		c.mu.Unlock()
+		c.log().Info("duplicate submit ignored", "job", spec.JobID)
+		return nil
+	}
+	c.inflight[spec.JobID] = true
 	if len(sub.ChangedFiles) == 0 {
 		sub.ChangedFiles = c.hints[spec.Repo+"@"+spec.Commit].changed
 	}
 	c.records[spec.JobID] = rec
 	c.mu.Unlock()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			c.mu.Lock()
+			delete(c.inflight, spec.JobID)
+			c.mu.Unlock()
+		}
+	}()
+	// A job that can't be recorded is refused, so the frontend retries it
+	// rather than it being lost in a restart.
+	if err := c.saveJob(ctx, sub, store.JobQueued, nil); err != nil {
+		return fmt.Errorf("persist job %s: %w", spec.JobID, err)
+	}
+	defer c.saveRecord(ctx, rec)
 
 	place := c.Scheduler.Place
 	if overdue {
@@ -206,21 +237,33 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		// Within its bound, a deferrable job waits for owned capacity
 		// rather than paying for burst.
 		sub.Deferrable && !overdue && errors.Is(err, scheduler.ErrNoCapacity):
+		// Persist before queueing: once the job is in c.deferred,
+		// RetryDeferred may place it, and a late "deferred" write would
+		// overwrite its "assigned" row.
+		c.noteJob(ctx, sub, store.JobDeferred, nil)
 		c.mu.Lock()
+		delete(c.inflight, spec.JobID)
 		c.deferred = append(c.deferred, sub)
 		c.mu.Unlock()
+		handedOff = true
+		return nil
+	case errors.Is(err, scheduler.ErrAlreadyPlaced):
+		// Placed by a path outside Submit; its row is not ours to change.
 		return nil
 	case errors.Is(err, scheduler.ErrNoCapacity):
 		rec.Burst = true
 		if c.Burst == nil {
+			c.noteJob(ctx, sub, store.JobRejected, nil)
 			return err
 		}
+		c.noteJob(ctx, sub, store.JobBurst, nil)
 		if err := c.Burst.Submit(ctx, sub); err != nil {
 			return err
 		}
 		c.offPeakStarted(sub, overdue)
 		return nil
 	case err != nil:
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return err
 	}
 	rec.HostID = a.HostID
@@ -236,6 +279,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		if rolling {
 			ir.Unassign(spec.JobID)
 		}
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return err
 	}
 	rec.PrebuildMatch = msg.PrebuildMatch
@@ -248,8 +292,12 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		if rolling {
 			ir.Unassign(spec.JobID)
 		}
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return fmt.Errorf("host %s not connected", a.HostID)
 	}
+	// Recorded before sending: after a restart the reservation is restored
+	// and released by the host's result.
+	c.noteJob(ctx, sub, store.JobAssigned, &a)
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
 	c.offPeakStarted(sub, overdue)
 	return nil
@@ -259,6 +307,17 @@ func (c *Core) offPeakStarted(sub jobapi.Submission, overdue bool) {
 	if sub.Deferrable && c.OffPeak != nil {
 		c.OffPeak.Started(c.now().Sub(sub.QueuedAt), overdue)
 	}
+}
+
+// deferredLocked reports whether jobID waits in the deferred queue. c.mu
+// must be held.
+func (c *Core) deferredLocked(jobID string) bool {
+	for _, d := range c.deferred {
+		if d.Spec.JobID == jobID {
+			return true
+		}
+	}
+	return false
 }
 
 // RetryDeferred re-submits deferred jobs, oldest first, and samples fleet
