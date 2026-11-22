@@ -91,7 +91,7 @@ Not built yet:
 - **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
 - **Persistence.** The control plane keeps all state in memory, and secrets need a managed key store.
-- **mTLS** on the host link, plus **hostd**: cancel, pre-fork, peer snapshot pull, inventory rebuild on restart, and buffering results across reconnects.
+- **mTLS** on the host link, plus **hostd**: pre-fork, peer snapshot pull, inventory rebuild on restart, and buffering results across reconnects.
 - **Observability export** (OpenTelemetry/Prometheus/ClickHouse) and billing.
 
 Open decisions D2 to D6 and the open questions are listed at the end of the [design doc](docs/architecture.md#risks-open-questions-and-decisions).

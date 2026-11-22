@@ -11,13 +11,19 @@
 //!
 //! One job per VM, never reused. A failure here should make a job slower,
 //! never fail it silently: every error path still tears the VM down.
+//!
+//! Cancellation: `Agent::cancel` asks the guest agent to stop the runner
+//! and, if the guest has not reported within `cancel_grace`, unblocks the
+//! wait so the VM is torn down anyway. A job cancelled before its VM runs
+//! never starts one. Either way the result is OUTCOME_CANCELLED and nothing
+//! is promoted.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::hypervisor::{GuestDisk, GuestPayload, GuestPrebuild, Hypervisor};
+use crate::hypervisor::{GuestDisk, GuestPayload, GuestPrebuild, GuestStop, Hypervisor};
 use crate::pb;
 use crate::rootfs;
 use crate::storage::{self, Storage};
@@ -26,15 +32,34 @@ use crate::storage::{self, Storage};
 pub const JOB_DEADLINE: Duration = Duration::from_secs(6 * 3600);
 /// Size of an empty job disk when there is no prebuild.
 pub const EMPTY_DISK_GB: u32 = 64;
+/// How long a cancelled job's guest gets to stop its runner and report
+/// before hostd tears the VM down regardless.
+pub const CANCEL_GRACE: Duration = Duration::from_secs(30);
 
 pub type Events<'a> = &'a (dyn Fn(pb::Phase) + Sync);
+
+/// Per-job cancellation state, shared between `run_job` and `cancel`.
+#[derive(Default)]
+struct CancelState {
+    requested: bool,
+    /// Set once the guest has its payload and can be told to stop.
+    stop: Option<Arc<dyn GuestStop>>,
+}
+
+type CancelSlot = Arc<Mutex<CancelState>>;
+
+fn cancel_requested(slot: &CancelSlot) -> bool {
+    slot.lock().unwrap().requested
+}
 
 pub struct Agent<H: Hypervisor, S: Storage> {
     pub hv: H,
     pub storage: S,
     /// Paused VMs kept ready per vCPU size.
     pub warm_target: HashMap<u32, usize>,
+    pub cancel_grace: Duration,
     pool: Mutex<HashMap<u32, Vec<H::Vm>>>,
+    jobs: Mutex<HashMap<String, CancelSlot>>,
 }
 
 impl<H: Hypervisor, S: Storage> Agent<H, S> {
@@ -43,8 +68,61 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             hv,
             storage,
             warm_target,
+            cancel_grace: CANCEL_GRACE,
             pool: Mutex::new(HashMap::new()),
+            jobs: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Makes a job cancellable before `run_job` starts it, so a CancelJob
+    /// that arrives right behind its AssignJob is not lost. `run_job` calls
+    /// this too; calling it first is optional.
+    pub fn admit(&self, job_id: &str) {
+        self.slot(job_id);
+    }
+
+    fn slot(&self, job_id: &str) -> CancelSlot {
+        self.jobs
+            .lock()
+            .unwrap()
+            .entry(job_id.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// Cancels a job on this host. Returns false if the job is unknown
+    /// (never assigned here, or already finished).
+    pub fn cancel(&self, job_id: &str) -> bool {
+        let Some(slot) = self.jobs.lock().unwrap().get(job_id).cloned() else {
+            return false;
+        };
+        let stop = {
+            let mut c = slot.lock().unwrap();
+            if c.requested {
+                return true;
+            }
+            c.requested = true;
+            c.stop.clone()
+        };
+        if let Some(stop) = stop {
+            self.stop_guest(job_id, stop);
+        }
+        true
+    }
+
+    /// Asks the guest to stop its runner, and unblocks the wait after the
+    /// grace period in case it never reports.
+    fn stop_guest(&self, job_id: &str, stop: Arc<dyn GuestStop>) {
+        if let Err(e) = stop.stop_runner() {
+            tracing::warn!(job = %job_id, error = %format!("{e:#}"), "signal guest to stop runner");
+            stop.abort_wait();
+            return;
+        }
+        let grace = self.cancel_grace;
+        std::thread::spawn(move || {
+            std::thread::sleep(grace);
+            stop.abort_wait();
+        });
     }
 
     /// Restores paused VMs until every size reaches its target.
@@ -88,12 +166,20 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             commit: job.commit.clone(),
             ..Default::default()
         };
+        let slot = self.slot(&job.job_id);
         let mut disks: Vec<String> = Vec::new(); // volumes to discard
-        let outcome = self.run_inner(job, events, &mut disks, &mut result);
+        let outcome = self.run_inner(job, events, &slot, &mut disks, &mut result);
         if let Err(e) = outcome {
-            result.set_outcome(pb::job_result::Outcome::InfraError);
+            // An error after a cancel (e.g. tearing the VM down) is still
+            // reported as a cancel, so it is not retried as an infra error.
+            result.set_outcome(if cancel_requested(&slot) {
+                pb::job_result::Outcome::Cancelled
+            } else {
+                pb::job_result::Outcome::InfraError
+            });
             result.error = format!("{e:#}");
         }
+        self.jobs.lock().unwrap().remove(&job.job_id);
         // Discard whatever wasn't kept. Errors here are logged, not
         // surfaced: the job's result is already decided.
         for d in disks.into_iter().rev() {
@@ -108,6 +194,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         &self,
         job: &pb::AssignJob,
         events: Events,
+        slot: &CancelSlot,
         disks: &mut Vec<String>,
         result: &mut pb::JobResult,
     ) -> Result<()> {
@@ -144,6 +231,12 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             }
             disks.push(clone.clone());
             sticky.push((v, clone));
+        }
+
+        // Cancelled while forking disks: don't start a VM at all.
+        if cancel_requested(slot) {
+            result.set_outcome(pb::job_result::Outcome::Cancelled);
+            return Ok(());
         }
 
         let mut vm = self.take_vm(job.vcpu, job.memory_gb)?;
@@ -191,9 +284,32 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                     scrub_paths: b.scrub_paths.clone(),
                 });
             }
+            // Don't hand the runner its config if the job is already
+            // cancelled.
+            if cancel_requested(slot) {
+                return Ok(pb::job_result::Outcome::Cancelled);
+            }
             self.hv.send_payload(&mut vm, &payload)?;
 
-            let guest = self.hv.wait(&mut vm, JOB_DEADLINE)?;
+            // From here a cancel reaches the guest. Registering and checking
+            // under one lock means a cancel racing with this is never lost.
+            let stop = self.hv.guest_stop(&vm)?;
+            let cancelled = {
+                let mut c = slot.lock().unwrap();
+                c.stop = Some(stop.clone());
+                c.requested
+            };
+            if cancelled {
+                self.stop_guest(&job.job_id, stop);
+            }
+
+            let waited = self.hv.wait(&mut vm, JOB_DEADLINE);
+            // The guest stopped (or was cut off) because of a cancel: the
+            // job did not fail on its own.
+            if cancel_requested(slot) {
+                return Ok(pb::job_result::Outcome::Cancelled);
+            }
+            let guest = waited?;
             events(pb::Phase::JobFinished);
             if building.is_some() && guest.secret_scan_clean != Some(true) {
                 anyhow::bail!("prebuild secret scan failed or did not run");
@@ -424,6 +540,90 @@ mod tests {
         let r = a.run_job(&j, &|_| {});
         assert_eq!(r.outcome(), Outcome::InfraError);
         assert_eq!(a.hv.restored.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// Runs the job on another thread, waits until the guest is running it,
+    /// cancels it, and returns the result.
+    fn cancel_while_running(
+        a: Arc<Agent<FakeHypervisor, FakeStorage>>,
+        j: pb::AssignJob,
+    ) -> (pb::JobResult, Vec<pb::Phase>) {
+        let runner = {
+            let a = a.clone();
+            std::thread::spawn(move || {
+                let seen = Mutex::new(Vec::new());
+                let r = a.run_job(&j, &|p| seen.lock().unwrap().push(p));
+                (r, seen.into_inner().unwrap())
+            })
+        };
+        let start = std::time::Instant::now();
+        while !a.hv.guest.waiting() {
+            assert!(start.elapsed() < Duration::from_secs(5), "job never ran");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(a.cancel("gh_1"));
+        runner.join().unwrap()
+    }
+
+    #[test]
+    fn cancel_stops_runner_then_destroys_vm() {
+        let hv = FakeHypervisor {
+            block_wait: true,
+            ..Default::default()
+        };
+        let a = Arc::new(agent(hv, seeded()));
+        let (r, phases) = cancel_while_running(a.clone(), job(pb::Trust::Trusted));
+        assert_eq!(r.outcome(), Outcome::Cancelled, "{}", r.error);
+        assert_eq!(a.hv.guest.stop_requests(), 1);
+        assert!(
+            !a.hv.guest.aborted(),
+            "guest stopped within the grace period"
+        );
+        assert_eq!(a.hv.destroyed.lock().unwrap().len(), 1);
+        assert_eq!(phases, vec![pb::Phase::VmResumed, pb::Phase::VmDestroyed]);
+        assert!(r.promoted.is_empty(), "cancelled runs never promote");
+        assert!(!a.storage.has("jobs/gh_1"));
+        assert!(!a.storage.has("jobs/gh_1-docker"));
+        assert!(!a.cancel("gh_1"), "finished jobs are forgotten");
+    }
+
+    #[test]
+    fn cancel_tears_down_guest_that_ignores_stop() {
+        let hv = FakeHypervisor {
+            block_wait: true,
+            ignore_stop: true,
+            ..Default::default()
+        };
+        let mut a = agent(hv, seeded());
+        a.cancel_grace = Duration::from_millis(10);
+        let a = Arc::new(a);
+        let (r, _) = cancel_while_running(a.clone(), job(pb::Trust::Trusted));
+        assert_eq!(r.outcome(), Outcome::Cancelled, "{}", r.error);
+        assert_eq!(a.hv.guest.stop_requests(), 1);
+        assert!(a.hv.guest.aborted());
+        assert_eq!(a.hv.destroyed.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cancel_before_start_never_starts_a_vm() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        a.admit("gh_1");
+        assert!(a.cancel("gh_1"));
+        let r = a.run_job(&job(pb::Trust::Trusted), &|_| {});
+        assert_eq!(r.outcome(), Outcome::Cancelled);
+        assert_eq!(a.hv.restored.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(a.hv.payloads.lock().unwrap().is_empty());
+        assert!(!a.storage.has("jobs/gh_1"), "forked disks discarded");
+        assert!(!a.storage.has("jobs/gh_1-docker"));
+    }
+
+    #[test]
+    fn cancel_unknown_job_is_rejected() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        assert!(!a.cancel("gh_1"));
+        // And it does not poison a later job with that id.
+        let r = a.run_job(&job(pb::Trust::Untrusted), &|_| {});
+        assert_eq!(r.outcome(), Outcome::Succeeded);
     }
 
     #[test]
