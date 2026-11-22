@@ -149,17 +149,15 @@ Each VM gets its own network namespace and tap (`hostd/src/network.rs`); hostd n
 
 ## Status
 
-Built and unit-tested: the job spec, GitHub adapter, scheduler, prebuild config/keys/fork planning, the prebuild manager (against a fake platform source), cache scoping, mirror config, the hostlink protocol on both sides, and the hostd job lifecycle against fake hypervisor and storage backends.
+Built and unit-tested: the job spec, GitHub adapter (per-installation API budget, opt-in re-runs of infrastructure failures, nightly clean run, pilot-org allowlist), scheduler, prebuild config/keys/fork planning, the prebuild manager (against a fake platform source), the Actions cache service and its scoping rules, mirror config and the mirror pair, the guest agent, the hostlink protocol on both sides (mTLS, acks and replay), hostd (networking, cancel, pre-fork, peer snapshot pull, restart recovery, base image pipeline pieces), Postgres persistence, the key store, metering and billing, burst capacity selection, abuse controls, and the observability stack's configuration. Everything runs against fakes and in-memory backends in tests.
 
-Not built yet:
+Not built or not proven on real infrastructure:
 
-- **Guest agent.** The in-VM process that receives the vsock payload, mounts disks, stashes warm paths, starts the runner and reports results. hostd's side of that protocol exists (`hostd/src/hypervisor.rs`).
 - **Base image pipeline, the parts that need real infrastructure.** The pipeline (build plan, `build.sh`, signing, SBOM, rollout, per-size snapshot builder) exists, but no image has been built on a real builder or booted under Cloud Hypervisor yet, there is no image store to push images to hosts, and hostd still restores every VM from the single `TACHYON_BASE_SNAPSHOTS` version rather than the version a job is assigned. Builds are not yet byte-reproducible: some upstream install scripts download "latest" artifacts outside apt.
-- **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
-- **Prebuild manager in production.** Triggers, planning and dispatch exist, but trigger state is in memory and no build has run on a real host.
-- **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
+- **Prebuild manager in production.** Triggers, planning and dispatch exist, but trigger state is in memory, and no build has run on a real host.
+- **Actions cache object store (D4).** The protocol server writes through a `BlobStore` interface; no real store backs it yet.
 - **Mirror rollout.** `tachyon-mirror` is built and tested against fake upstreams only; provisioning the instances, TLS certificates, and feeding the git mirror the list of repos Tachyon builds (a flag for now) are not done.
-- **Secrets persistence.** Control plane state is in Postgres, but secrets (JIT runner configs) are still in memory until a managed key store lands; after a restart, jobs whose JIT config was lost are re-dispatched by the adapter's reconcile loop.
-- **Host certificate issuer** backed by the key store, and on-host renewal. mTLS and host identity checks on the host link are built; only the `tachyon hostcert` development issuer exists.
+- **Burst providers and abuse account data.** The burst selector has no cloud provider behind it, and the abuse gate uses an in-memory account store (every tenant gets `-unknown-tenant-plan`).
+- **Host certificate issuer** backed by the key store, and on-host renewal. Only the `tachyon hostcert` development issuer exists.
 
 Open decisions D2 to D6 and the open questions are listed at the end of the [design doc](docs/architecture.md#risks-open-questions-and-decisions).
