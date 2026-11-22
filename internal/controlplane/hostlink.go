@@ -142,6 +142,11 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 		case *hostlinkv1.LinkRequest_Hello:
 			return fmt.Errorf("host %s: duplicate Hello", hc.id)
 		}
+		if seq := m.GetSeq(); seq > 0 {
+			// The host keeps the message until acked and may resend it
+			// after a reconnect; onJobEvent and onJobResult are idempotent.
+			hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Ack{Ack: &hostlinkv1.Ack{Seq: seq}}})
+		}
 	}
 }
 

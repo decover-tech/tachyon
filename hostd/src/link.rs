@@ -1,6 +1,7 @@
 //! The hostd side of hostlink.v1: dial the control plane, keep one stream
 //! open, heartbeat, run assigned jobs and report their results. If the
-//! stream drops, running jobs keep running and hostd reconnects.
+//! stream drops, running jobs keep running and hostd reconnects. Job events
+//! and results go through the outbox and are resent until acked.
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -12,6 +13,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::hypervisor::Hypervisor;
 use crate::lifecycle::Agent;
+use crate::outbox::Outbox;
 use crate::pb::{self, host_link_service_client::HostLinkServiceClient};
 use crate::replicate;
 use crate::storage::Storage;
@@ -66,6 +68,8 @@ pub struct Link<H: Hypervisor + 'static, S: Storage + 'static> {
     pub draining: Arc<AtomicBool>,
     /// Snapshot replication; None ignores pull requests and grants.
     pub peer: Option<Arc<Peer>>,
+    /// Job events and results not yet acked by the control plane.
+    pub outbox: Arc<Outbox>,
     running: Arc<Mutex<HashMap<String, ()>>>,
 }
 
@@ -81,6 +85,7 @@ where
             inventory: Arc::default(),
             draining: Arc::default(),
             peer: None,
+            outbox: Arc::default(),
             running: Arc::default(),
         }
     }
@@ -163,11 +168,16 @@ where
                 }
             })
         };
+        // Replays everything unacked, then sends new events and results.
+        let fwd = tokio::spawn(forward(self.outbox.clone(), tx.clone()));
 
         let result = async {
             while let Some(m) = inbound.message().await? {
                 match m.msg {
-                    Some(pb::link_response::Msg::Assign(job)) => self.start_job(job, tx.clone()),
+                    Some(pb::link_response::Msg::Assign(job)) => {
+                        self.start_job(job);
+                    }
+                    Some(pb::link_response::Msg::Ack(a)) => self.outbox.ack(a.seq),
                     Some(pb::link_response::Msg::Drain(d)) => {
                         self.draining.store(d.drain, Ordering::Relaxed);
                         tracing::info!(drain = d.drain, "drain state changed");
@@ -199,6 +209,7 @@ where
         .await;
         hb.abort();
         sweep.abort();
+        fwd.abort();
         result
     }
 
@@ -231,18 +242,19 @@ where
         });
     }
 
-    fn start_job(&self, job: pb::AssignJob, tx: mpsc::Sender<pb::LinkRequest>) {
+    fn start_job(&self, job: pb::AssignJob) -> tokio::task::JoinHandle<()> {
         let job_id = job.job_id.clone();
         self.running.lock().unwrap().insert(job_id.clone(), ());
-        self.agent.admit(&job_id);
-        let (agent, inv, running) = (
+        self.outbox.mark_running(&job_id);
+        let (agent, inv, running, outbox) = (
             self.agent.clone(),
             self.inventory.clone(),
             self.running.clone(),
+            self.outbox.clone(),
         );
         tracing::info!(job = %job_id, repo = %job.repo, vcpu = job.vcpu, "assigned");
         tokio::task::spawn_blocking(move || {
-            let ev_tx = tx.clone();
+            let ev_outbox = outbox.clone();
             let ev_job = job_id.clone();
             let events = move |phase: pb::Phase| {
                 let e = pb::JobEvent {
@@ -250,7 +262,7 @@ where
                     phase: phase as i32,
                     at: Some(now()),
                 };
-                let _ = ev_tx.blocking_send(msg(pb::link_request::Msg::JobEvent(e)));
+                ev_outbox.push(pb::link_request::Msg::JobEvent(e));
             };
             let result = agent.run_job(&job, &events);
             if let Some(p) = &result.prebuild {
@@ -261,18 +273,40 @@ where
             }
             running.lock().unwrap().remove(&job_id);
             tracing::info!(job = %job_id, outcome = ?result.outcome(), "finished");
-            // TODO: buffer results across reconnects instead of dropping
-            // them when this session's stream has closed.
-            let _ = tx.blocking_send(msg(pb::link_request::Msg::JobResult(result)));
+            // Kept until acked, across reconnects and restarts.
+            outbox.push(pb::link_request::Msg::JobResult(result));
+            outbox.mark_done(&job_id);
             if let Err(e) = agent.refill_pool() {
                 tracing::warn!(error = %format!("{e:#}"), "refill warm pool");
             }
-        });
+        })
+    }
+}
+
+/// Sends every unacked outbox message on this session's stream, oldest
+/// first, then each new one as it is pushed. Returns when the stream closes.
+async fn forward(outbox: Arc<Outbox>, tx: mpsc::Sender<pb::LinkRequest>) {
+    let mut pushed = outbox.subscribe();
+    let mut sent = 0;
+    loop {
+        pushed.borrow_and_update();
+        for m in outbox.pending_after(sent) {
+            sent = m.seq;
+            if tx.send(m).await.is_err() {
+                return;
+            }
+        }
+        if pushed.changed().await.is_err() {
+            return;
+        }
     }
 }
 
 fn msg(m: pb::link_request::Msg) -> pb::LinkRequest {
-    pb::LinkRequest { msg: Some(m) }
+    pb::LinkRequest {
+        msg: Some(m),
+        seq: 0,
+    }
 }
 
 fn now() -> prost_types::Timestamp {
@@ -282,6 +316,103 @@ fn now() -> prost_types::Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hypervisor::fake::FakeHypervisor;
+    use crate::storage::fake::FakeStorage;
+
+    fn event(job: &str) -> pb::link_request::Msg {
+        pb::link_request::Msg::JobEvent(pb::JobEvent {
+            job_id: job.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn recv(rx: &mut mpsc::Receiver<pb::LinkRequest>) -> u64 {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("forwarded")
+            .expect("open")
+            .seq
+    }
+
+    #[tokio::test]
+    async fn forward_replays_unacked_after_reconnect() {
+        let outbox = Arc::new(Outbox::default());
+        outbox.push(event("j1")); // queued while disconnected
+        outbox.push(event("j1"));
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let fwd = tokio::spawn(forward(outbox.clone(), tx));
+        assert_eq!(recv(&mut rx).await, 1);
+        assert_eq!(recv(&mut rx).await, 2);
+        outbox.push(event("j2")); // pushed while linked
+        assert_eq!(recv(&mut rx).await, 3);
+        outbox.ack(1);
+        fwd.abort(); // stream lost before 2 and 3 were acked
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let fwd = tokio::spawn(forward(outbox.clone(), tx));
+        assert_eq!(recv(&mut rx).await, 2);
+        assert_eq!(recv(&mut rx).await, 3);
+        fwd.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_stops_when_stream_closes() {
+        let outbox = Arc::new(Outbox::default());
+        outbox.push(event("j1"));
+        let (tx, rx) = mpsc::channel(16);
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(2), forward(outbox, tx))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_result_buffered_while_disconnected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = Arc::new(Agent::new(
+            FakeHypervisor::default(),
+            FakeStorage::default(),
+            HashMap::new(),
+        ));
+        let mut link = Link::new(
+            agent,
+            HostInfo {
+                host_id: "h1".into(),
+                region: "r".into(),
+                failure_domain: "f".into(),
+                arch: "x86_64".into(),
+                vcpu: 4,
+                memory_gb: 16,
+                peer_address: String::new(),
+            },
+            "http://127.0.0.1:1".into(),
+        );
+        link.outbox = Arc::new(Outbox::open(tmp.path()).unwrap());
+        // No session is open: the result must still be kept.
+        link.start_job(pb::AssignJob {
+            job_id: "gh/1".into(),
+            vcpu: 4,
+            memory_gb: 16,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(link.outbox.has_result("gh/1"));
+        assert!(link.outbox.interrupted().is_empty(), "marker cleared");
+        let phases: Vec<_> = link
+            .outbox
+            .pending_after(0)
+            .into_iter()
+            .filter_map(|m| match m.msg {
+                Some(pb::link_request::Msg::JobEvent(e)) => Some(e.phase()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(phases.first(), Some(&pb::Phase::VmResumed));
+        // And it survives a restart.
+        assert!(Outbox::open(tmp.path()).unwrap().has_result("gh/1"));
+    }
 
     #[test]
     fn inventory_replaces_by_kind() {

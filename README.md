@@ -102,6 +102,7 @@ Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9
 | `TACHYON_DNS` | no | comma list of IPv4 DNS servers guests may query |
 | `TACHYON_PEER_ADDRESS` | no | address peers use to pull snapshots from this host, e.g. `http://h1.internal:7443`; unset = serve no pulls |
 | `TACHYON_PEER_LISTEN`, `TACHYON_IMAGES_DIR` | no | `0.0.0.0:7443`, `/var/lib/tachyon/images` (base images as `<name@version>.img`) |
+| `TACHYON_STATE_DIR` | no | `/var/lib/tachyon/hostd`: unacked job events/results and running-job markers, kept across restarts |
 
 `tachyon-hostd prepare-image ubuntu-24.04@2026-11-16` verifies an image in `TACHYON_IMAGES` against the keys in `TACHYON_IMAGE_TRUST` (PEM), then boots it once per VM size and leaves paused snapshots in `<image>/snapshots/<vcpu>/` (point `TACHYON_BASE_SNAPSHOTS` there). It boots `TACHYON_GUEST_KERNEL` when the image ships no kernel.
 

@@ -26,6 +26,10 @@ message LinkRequest {
     JobEvent job_event = 3;
     JobResult job_result = 4;
   }
+  // Set on job events and results. hostd keeps each one, across reconnects
+  // and restarts, until the control plane acks its seq; it may resend after
+  // a reconnect, so handling must be idempotent. 0 = not acked.
+  uint64 seq = 5;
 }
 
 // First message on every stream.
@@ -117,7 +121,13 @@ message LinkResponse {
     Drain drain = 4;
     PullSnapshot pull_snapshot = 5;
     ServeSnapshot serve_snapshot = 6;
+    Ack ack = 7;
   }
+}
+
+// Acknowledges every LinkRequest on this stream with seq <= this one.
+message Ack {
+  uint64 seq = 1;
 }
 
 enum Trust {

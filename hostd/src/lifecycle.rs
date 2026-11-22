@@ -354,12 +354,14 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                 .storage
                 .snapshot(&job_disk, &storage::sanitize(&b.key))?;
             disks.retain(|d| d != &job_disk);
-            result.prebuild = Some(pb::SnapshotRef {
+            let r = pb::SnapshotRef {
                 kind: pb::snapshot_ref::Kind::Prebuild as i32,
                 repo: job.repo.clone(),
                 key: b.key.clone(),
                 id: snap,
-            });
+            };
+            crate::recovery::label_snapshot(&self.storage, &r);
+            result.prebuild = Some(r);
         }
         if trusted {
             for (v, clone) in &sticky {
@@ -367,12 +369,14 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                     .storage
                     .snapshot(clone, &format!("head-{}", storage::sanitize(&job.job_id)))?;
                 disks.retain(|d| d != clone);
-                result.promoted.push(pb::SnapshotRef {
+                let r = pb::SnapshotRef {
                     kind: pb::snapshot_ref::Kind::Sticky as i32,
                     repo: job.repo.clone(),
                     key: v.key.clone(),
                     id: snap,
-                });
+                };
+                crate::recovery::label_snapshot(&self.storage, &r);
+                result.promoted.push(r);
             }
         }
         Ok(())
@@ -439,6 +443,10 @@ mod tests {
         assert_eq!(r.promoted.len(), 1);
         assert_eq!(r.promoted[0].id, "jobs/gh_1-docker@head-gh_1");
         assert!(a.storage.has("jobs/gh_1-docker"), "promoted clone kept");
+        assert_eq!(
+            a.storage.labels.lock().unwrap()["jobs/gh_1-docker@head-gh_1"]["kind"],
+            "sticky"
+        );
         assert!(!a.storage.has("jobs/gh_1"), "job disk discarded");
         assert_eq!(r.avg_busy_vcpu, 1.5);
         assert_eq!(
@@ -542,6 +550,11 @@ mod tests {
         assert_eq!(pb.repo, "acme/api");
         assert_eq!(r.base_image, "ubuntu-24.04@2026-11-16");
         assert!(a.storage.has("jobs/gh_1"));
+        assert_eq!(
+            a.storage.labels.lock().unwrap()["jobs/gh_1@pb1-abc"]["repo"],
+            "acme/api",
+            "kept snapshots are labeled for restart recovery"
+        );
     }
 
     #[test]
