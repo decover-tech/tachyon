@@ -25,6 +25,21 @@ type Images interface {
 	Pin(name string) (string, error) // -> ubuntu-24.04@2026-11-16
 }
 
+// ImageRollout is implemented by Images that roll a new version out to
+// canary hosts before the fleet (images.Rollout). Optional.
+type ImageRollout interface {
+	// AssignImage returns the version a placed job runs on (the canary on
+	// a canary host) and records it as in use.
+	AssignImage(jobID, image, hostID string) string
+	// Unassign forgets a job that was never dispatched.
+	Unassign(jobID string)
+	ObserveHost(hostID string, images []string, draining bool)
+	// ForgetHost drops a host that disconnected, so a host that never
+	// comes back does not hold every later version back from going live.
+	ForgetHost(hostID string)
+	ObserveResult(jobID string, infraError bool)
+}
+
 // Prebuilds is the prebuild registry.
 type Prebuilds interface {
 	// Latest returns the newest healthy trusted prebuild and the config it
@@ -202,10 +217,17 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	}
 	rec.HostID = a.HostID
 	rec.Mark(telemetry.HostAssigned, c.now())
+	ir, rolling := c.Images.(ImageRollout)
+	if rolling {
+		spec.Image = ir.AssignImage(spec.JobID, spec.Image, a.HostID)
+	}
 
 	msg, err := c.buildAssign(ctx, sub, a)
 	if err != nil {
 		c.Scheduler.Release(spec.JobID, nil)
+		if rolling {
+			ir.Unassign(spec.JobID)
+		}
 		return err
 	}
 	rec.PrebuildMatch = msg.PrebuildMatch
@@ -215,6 +237,9 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	c.mu.Unlock()
 	if hc == nil {
 		c.Scheduler.Release(spec.JobID, nil)
+		if rolling {
+			ir.Unassign(spec.JobID)
+		}
 		return fmt.Errorf("host %s not connected", a.HostID)
 	}
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})

@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,6 +23,7 @@ import (
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
+	"github.com/decover-tech/tachyon/internal/images"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/scheduler"
 	"github.com/decover-tech/tachyon/internal/telemetry"
@@ -37,6 +40,9 @@ func main() {
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
 	registryMirror := flag.String("mirror-registry", "", "container registry mirror URL")
 	maxDeferral := flag.Duration("max-deferral", controlplane.DefaultMaxDeferral, "longest a tachyon-deferrable job waits for a quiet fleet")
+	imageTrust := flag.String("image-trust", "", "trusted base image signing keys (PEM); enables signed images with canary rollout instead of -image")
+	imageManifests := flag.String("image-manifests", "", "comma-separated signed base image manifests to publish at startup")
+	canaryHosts := flag.String("canary-hosts", "", "comma-separated host IDs that take new base images first")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -56,16 +62,28 @@ func main() {
 		os.Exit(1)
 	}
 
-	images := controlplane.StaticImages{}
-	for _, kv := range strings.Split(*image, ",") {
-		if n, v, ok := strings.Cut(kv, "="); ok {
-			images[n] = v
+	var pins controlplane.Images
+	var rollout *images.Rollout
+	if *imageTrust != "" {
+		rollout, err = loadRollout(*imageTrust, *imageManifests, *canaryHosts)
+		if err != nil {
+			log.Error("base image rollout", "err", err)
+			os.Exit(1)
 		}
+		pins = rollout
+	} else {
+		static := controlplane.StaticImages{}
+		for _, kv := range strings.Split(*image, ",") {
+			if n, v, ok := strings.Cut(kv, "="); ok {
+				static[n] = v
+			}
+		}
+		pins = static
 	}
 	secrets := &controlplane.MemSecrets{}
 	core := &controlplane.Core{
 		Scheduler: scheduler.New(nil),
-		Images:    images,
+		Images:    pins,
 		Prebuilds: &controlplane.MemPrebuilds{},
 		Secrets:   secrets,
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
@@ -111,6 +129,11 @@ func main() {
 			case <-t.C:
 				adapter.Reconcile(ctx)
 				core.RetryDeferred(ctx)
+				if rollout != nil {
+					for _, tr := range rollout.Advance() {
+						log.Info("base image rollout", "image", tr.Ref.String(), "from", tr.From, "to", tr.To, "reason", tr.Reason)
+					}
+				}
 			case <-report.C:
 				r := core.OffPeak.Report()
 				log.Info("off-peak class", "window", r.Window, "avg_util", r.AvgUtil, "base_util", r.AvgBaseUtil,
@@ -136,4 +159,40 @@ func main() {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdown)
 	grpcSrv.GracefulStop()
+}
+
+// loadRollout reads the trusted image keys and publishes the given signed
+// manifests. Rollout state is in memory, like the rest of this build.
+func loadRollout(trustFile, manifests, canary string) (*images.Rollout, error) {
+	pem, err := os.ReadFile(trustFile)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := images.ParsePublicKeys(pem)
+	if err != nil {
+		return nil, err
+	}
+	r := &images.Rollout{Trusted: keys}
+	for _, h := range strings.Split(canary, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			r.Policy.CanaryHosts = append(r.Policy.CanaryHosts, h)
+		}
+	}
+	for _, path := range strings.Split(manifests, ",") {
+		if path = strings.TrimSpace(path); path == "" {
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var s images.Signed
+		if err := json.Unmarshal(data, &s); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if _, err := r.Publish(&s); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	return r, nil
 }

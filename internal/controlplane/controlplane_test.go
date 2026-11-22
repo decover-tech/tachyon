@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"sync"
 	"context"
 	"errors"
 	"io"
@@ -26,6 +27,8 @@ type fakeStream struct {
 	in      chan *hostlinkv1.LinkRequest
 	out     chan *hostlinkv1.LinkResponse
 	waiting chan struct{}
+	// disconnect closes the stream and waits for Link to return.
+	disconnect func()
 }
 
 func (s *fakeStream) Context() context.Context { return s.ctx }
@@ -115,10 +118,14 @@ func (e *env) connect(t *testing.T, id, region string, vcpu, mem uint32) *fakeSt
 	s.push(t, &hostlinkv1.LinkRequest{Msg: &hostlinkv1.LinkRequest_Hello{Hello: &hostlinkv1.Hello{
 		HostId: id, Region: region, FailureDomain: id, Arch: "x86_64", Vcpu: vcpu, MemoryGb: mem,
 	}}})
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	var once sync.Once
+	s.disconnect = func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+	t.Cleanup(s.disconnect)
 	return s
 }
 
