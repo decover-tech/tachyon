@@ -73,6 +73,7 @@ func main() {
 	mirrorPrimary := flag.String("mirror-primary", "", "primary tachyon-mirror base URL; with -mirror-secondary, health-checked and overrides the static -mirror-* flags")
 	mirrorSecondary := flag.String("mirror-secondary", "", "secondary tachyon-mirror base URL")
 	gitRepos := flag.String("mirror-git-repos", "", "comma-separated public owner/name repos the mirrors' -git-repos serve; only jobs for these repos fetch git through the mirror (never list private repos)")
+	allowedOwners := flag.String("github-allowed-owners", "", "comma-separated GitHub orgs/users whose repos get runners (empty: any installation)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -190,6 +191,11 @@ func main() {
 		API:           ghClient,
 		Secrets:       keys,
 		Log:           log,
+	}
+	for _, o := range strings.Split(*allowedOwners, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			adapter.AllowedOwners = append(adapter.AllowedOwners, o)
+		}
 	}
 	optedIn := map[string]bool{}
 	for _, r := range strings.Split(*nightlyRepos, ",") {

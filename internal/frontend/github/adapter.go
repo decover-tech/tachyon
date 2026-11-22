@@ -41,6 +41,11 @@ type Adapter struct {
 	// Nightly, when set, runs one clean run per repo per night and reports
 	// divergence from the prebuild runs. Optional.
 	Nightly *Nightly
+	// AllowedOwners, when non-empty, limits work to repositories owned by
+	// these GitHub accounts (org or user logins, case-insensitive). A public
+	// App can be installed by anyone; during the pilot only listed orgs get
+	// runners. Events from other accounts are acknowledged and ignored.
+	AllowedOwners []string
 
 	mu      sync.Mutex
 	core    jobapi.Core
@@ -190,6 +195,9 @@ type pullRequestEvent struct {
 }
 
 func (a *Adapter) handleEvent(ctx context.Context, event string, body []byte) error {
+	if !a.ownerAllowed(event, body) {
+		return nil
+	}
 	switch event {
 	case "workflow_job":
 		var e workflowJobEvent
@@ -212,6 +220,29 @@ func (a *Adapter) handleEvent(ctx context.Context, event string, body []byte) er
 	default:
 		return nil // ping, installation, ... ignored
 	}
+}
+
+// ownerAllowed reports whether an event's repository belongs to an account in
+// AllowedOwners. Events without a repository (ping, installation) pass; they
+// start no work.
+func (a *Adapter) ownerAllowed(event string, body []byte) bool {
+	if len(a.AllowedOwners) == 0 {
+		return true
+	}
+	var env struct {
+		Repository *repository `json:"repository"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil || env.Repository == nil {
+		return true // malformed bodies fail in the typed decode below
+	}
+	owner, _, _ := strings.Cut(env.Repository.FullName, "/")
+	for _, o := range a.AllowedOwners {
+		if strings.EqualFold(o, owner) {
+			return true
+		}
+	}
+	a.log().Info("ignoring event from account not in the pilot allowlist", "event", event, "repo", env.Repository.FullName)
+	return false
 }
 
 func (a *Adapter) onWorkflowJob(ctx context.Context, e workflowJobEvent) error {

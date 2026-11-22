@@ -13,7 +13,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `proto/tachyon/hostlink/v1/` | protobuf | The only contract between hostd and the control plane. hostd dials out and holds one bidirectional stream |
 | `hostd/` | Rust | `tachyon-hostd`: warm VM pool, copy-on-write job disks (ZFS), per-VM jailer, Cloud Hypervisor control, sticky-volume promotion, prebuild snapshots |
 | `cmd/tachyon-controlplane/` | Go | Serves GitHub webhooks (HTTP) and the host link (gRPC). In-memory state for now |
-| `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key`, `tachyon hostcert` |
+| `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key`, `tachyon hostcert`, `tachyon github-app manifest` |
 | `cmd/tachyon-guest/` | Go | Guest agent inside each job VM: takes the job payload from hostd over vsock (port 1024), mounts disks, runs the GitHub runner or prebuild warm steps, reports back and powers off. Linux only |
 | `internal/hostauth/` | Go | Hostlink mTLS: server TLS config, host identity from client certificates, development certificate issuance |
 | `cmd/tachyon-mirror/` | Go | Regional pull-through package mirror (registry, npm, PyPI, Go, Maven, apt, git), run as a health-checked pair |
@@ -89,7 +89,9 @@ TACHYON_GITHUB_WEBHOOK_SECRET=... TACHYON_VAULT_TOKEN=... bin/tachyon-controlpla
 
 JIT runner configs are kept in a Vault or OpenBao KV v2 engine (`-vault-mount secret`, `-vault-prefix tachyon`, `-jit-ttl 10m`); use `-vault-token-file` instead of `TACHYON_VAULT_TOKEN` when a Vault Agent rotates the token. For local development without Vault, pass `-secrets mem`.
 
-Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090` over mutual TLS, and each host must present a certificate for its own `TACHYON_HOST_ID`. `tachyon hostcert` issues development certificates; issuance and rotation are in [docs/hostlink-mtls.md](docs/hostlink-mtls.md). Pass `-hostlink-insecure` (and `TACHYON_HOSTLINK_INSECURE=1` to hostd) to run without TLS locally.
+Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090` over mutual TLS, and each host must present a certificate for its own `TACHYON_HOST_ID`. `tachyon hostcert` issues development certificates; issuance and rotation are in [docs/hostlink-mtls.md](docs/hostlink-mtls.md). Pass `-hostlink-insecure` (and `TACHYON_HOSTLINK_INSECURE=1` to hostd) to run without TLS locally. `-github-allowed-owners org-a,org-b` limits runners to pilot orgs.
+
+Registering the GitHub App (least-privilege permissions, from a generated manifest) and the pilot-org installation flow are in [docs/github-app.md](docs/github-app.md).
 
 Set `TACHYON_DATABASE_URL` (e.g. `postgres://tachyon@db:5432/tachyon`) to keep jobs, pending runners, hosts, the prebuild registry and job records in Postgres; migrations run on start. After a restart, queued jobs are resubmitted and jobs running on hosts keep their reservations until the hosts reconnect and report results. Without it, state is in memory. The Postgres store tests run when `TACHYON_TEST_POSTGRES_DSN` is set.
 

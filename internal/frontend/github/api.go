@@ -4,7 +4,8 @@ import "context"
 
 // API is the subset of the GitHub REST API the adapter uses, authenticated as
 // the Tachyon GitHub App installation. The App requests only: self-hosted
-// runner management, Actions read, and contents read (for prebuilds).
+// runner management, Actions read, and contents read (for prebuilds); see
+// AppPermissions and Endpoints in app.go.
 type API interface {
 	// RunContext looks up the workflow run behind a job.
 	RunContext(ctx context.Context, installationID int64, repo string, runID int64) (RunContext, error)

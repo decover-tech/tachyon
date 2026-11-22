@@ -103,11 +103,18 @@ func (c *Client) installationToken(ctx context.Context, inst int64) (string, err
 		return "", err
 	}
 	var out struct {
-		Token     string    `json:"token"`
-		ExpiresAt time.Time `json:"expires_at"`
+		Token       string            `json:"token"`
+		ExpiresAt   time.Time         `json:"expires_at"`
+		Permissions map[string]string `json:"permissions"`
 	}
-	if err := c.do(ctx, "Bearer "+jwt, http.MethodPost, fmt.Sprintf("/app/installations/%d/access_tokens", inst), nil, &out); err != nil {
+	// Scope the token to exactly the App's least-privilege set, so it never
+	// carries more even if the App registration drifts.
+	body := map[string]any{"permissions": AppPermissions}
+	if err := c.do(ctx, "Bearer "+jwt, http.MethodPost, fmt.Sprintf("/app/installations/%d/access_tokens", inst), body, &out); err != nil {
 		return "", fmt.Errorf("installation token: %w", err)
+	}
+	if err := CheckGranted(out.Permissions); err != nil {
+		return "", fmt.Errorf("installation %d: %w", inst, err)
 	}
 	c.mu.Lock()
 	if c.tokens == nil {
