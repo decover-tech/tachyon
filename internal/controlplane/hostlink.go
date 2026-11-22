@@ -1,10 +1,14 @@
 package controlplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
 	"github.com/decover-tech/tachyon/internal/jobapi"
@@ -34,10 +38,24 @@ func (h *hostConn) send(m *hostlinkv1.LinkResponse) {
 	}
 }
 
+// HostAuthenticator proves that a hostlink stream comes from hostID,
+// typically from its mTLS client certificate (hostauth.PeerAuthenticator).
+// It returns when the credential expires (zero for never); the stream is
+// closed then so the host reconnects with its rotated certificate.
+type HostAuthenticator interface {
+	AuthenticateHost(ctx context.Context, hostID string) (expires time.Time, err error)
+}
+
+// errCredentialExpired ends a stream whose client certificate expired.
+var errCredentialExpired = status.Error(codes.Unauthenticated, "host certificate expired; reconnect with a fresh one")
+
 // HostLink serves hostlink.v1.HostLinkService on top of a Core.
 type HostLink struct {
 	hostlinkv1.UnimplementedHostLinkServiceServer
 	Core *Core
+	// Auth authenticates each stream against its Hello.host_id. Nil accepts
+	// any host and is only for tests and local development.
+	Auth HostAuthenticator
 }
 
 // Link handles one hostd stream: Hello first, then heartbeats, job
@@ -52,8 +70,19 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 	if hello == nil || hello.GetHostId() == "" {
 		return errors.New("first message must be Hello with host_id")
 	}
-	// TODO: authenticate the host from its mTLS client certificate and
-	// check it matches hello.host_id.
+	var expiry <-chan time.Time
+	if s.Auth != nil {
+		expires, err := s.Auth.AuthenticateHost(stream.Context(), hello.GetHostId())
+		if err != nil {
+			c.log().Warn("host rejected", "host", hello.GetHostId(), "err", err)
+			return status.Errorf(codes.PermissionDenied, "host %q: %v", hello.GetHostId(), err)
+		}
+		if !expires.IsZero() {
+			t := time.NewTimer(time.Until(expires))
+			defer t.Stop()
+			expiry = t.C
+		}
+	}
 	hc := &hostConn{
 		id:            hello.GetHostId(),
 		region:        hello.GetRegion(),
@@ -95,6 +124,9 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 				return
 			case <-stream.Context().Done():
 				sendErr <- stream.Context().Err()
+				return
+			case <-expiry:
+				sendErr <- errCredentialExpired
 				return
 			}
 		}

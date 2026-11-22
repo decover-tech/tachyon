@@ -19,10 +19,12 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
+	"github.com/decover-tech/tachyon/internal/hostauth"
 	"github.com/decover-tech/tachyon/internal/images"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/scheduler"
@@ -43,6 +45,11 @@ func main() {
 	imageTrust := flag.String("image-trust", "", "trusted base image signing keys (PEM); enables signed images with canary rollout instead of -image")
 	imageManifests := flag.String("image-manifests", "", "comma-separated signed base image manifests to publish at startup")
 	canaryHosts := flag.String("canary-hosts", "", "comma-separated host IDs that take new base images first")
+	tlsCert := flag.String("hostlink-cert", "", "hostlink server certificate (PEM)")
+	tlsKey := flag.String("hostlink-key", "", "hostlink server private key (PEM)")
+	clientCA := flag.String("hostlink-client-ca", "", "CA bundle that host client certificates must chain to (PEM)")
+	trustDomain := flag.String("hostlink-trust-domain", hostauth.DefaultTrustDomain, "SPIFFE trust domain of host identities")
+	insecureLink := flag.Bool("hostlink-insecure", false, "serve hostlink without mTLS or host authentication (local development only)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -108,9 +115,21 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	httpSrv := &http.Server{Addr: *httpAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
-	// TODO: mTLS between hostd and the control plane.
-	grpcSrv := grpc.NewServer()
-	hostlinkv1.RegisterHostLinkServiceServer(grpcSrv, &controlplane.HostLink{Core: core})
+	link := &controlplane.HostLink{Core: core}
+	var grpcOpts []grpc.ServerOption
+	if *insecureLink {
+		log.Warn("hostlink running WITHOUT mTLS: any client can claim any host id")
+	} else {
+		tlsCfg, err := hostauth.ServerTLS(hostauth.ServerFiles{Cert: *tlsCert, Key: *tlsKey, ClientCA: *clientCA})
+		if err != nil {
+			log.Error("hostlink TLS (set -hostlink-cert, -hostlink-key, -hostlink-client-ca, or -hostlink-insecure for local development)", "err", err)
+			os.Exit(2)
+		}
+		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(tlsCfg)))
+		link.Auth = hostauth.PeerAuthenticator{TrustDomain: *trustDomain}
+	}
+	grpcSrv := grpc.NewServer(grpcOpts...)
+	hostlinkv1.RegisterHostLinkServiceServer(grpcSrv, link)
 	lis, err := net.Listen("tcp", *grpcAddr)
 	if err != nil {
 		log.Error("listen grpc", "err", err)
