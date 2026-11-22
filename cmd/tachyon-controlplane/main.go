@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/hostauth"
 	"github.com/decover-tech/tachyon/internal/images"
 	"github.com/decover-tech/tachyon/internal/mirrors"
+	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/scheduler"
 	"github.com/decover-tech/tachyon/internal/secrets"
 	"github.com/decover-tech/tachyon/internal/store/postgres"
@@ -62,6 +64,8 @@ func main() {
 	flag.StringVar(&keyStore.VaultNamespace, "vault-namespace", os.Getenv("VAULT_NAMESPACE"), "Vault namespace (optional)")
 	flag.StringVar(&keyStore.VaultTokenFile, "vault-token-file", "", "file holding the Vault token, re-read per request (default: $TACHYON_VAULT_TOKEN)")
 	flag.DurationVar(&keyStore.JITTTL, "jit-ttl", secrets.DefaultJITTTL, "TTL of stored JIT runner configs")
+	prebuildInterval := flag.Duration("prebuild-interval", 10*time.Minute, "minimum time between push-triggered prebuilds of one repo")
+	prebuildNightly := flag.Int("prebuild-nightly-hour", 3, "UTC hour after which each repo's nightly prebuild refresh runs")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -111,7 +115,9 @@ func main() {
 	if keyStore.Backend == "mem" {
 		log.Warn("secrets kept in process memory; use -secrets=vault in production")
 	}
-	var prebuilds controlplane.Prebuilds = &controlplane.MemPrebuilds{}
+	memPrebuilds := &controlplane.MemPrebuilds{}
+	var prebuilds controlplane.Prebuilds = memPrebuilds
+	setPrebuildConfig := memPrebuilds.SetConfig
 	var db *postgres.Store
 	if dsn := os.Getenv("TACHYON_DATABASE_URL"); dsn != "" {
 		db, err = postgres.Open(ctx, dsn)
@@ -120,9 +126,15 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
-		prebuilds = &controlplane.StorePrebuilds{Store: db, OnError: func(op string, err error) {
+		storePrebuilds := &controlplane.StorePrebuilds{Store: db, OnError: func(op string, err error) {
 			log.Warn("prebuild registry", "op", op, "err", err)
 		}}
+		prebuilds = storePrebuilds
+		setPrebuildConfig = func(repo string, c *prebuild.Config) {
+			if err := storePrebuilds.SetConfig(repo, c); err != nil {
+				log.Warn("prebuild registry", "op", "set config", "repo", repo, "err", err)
+			}
+		}
 	} else {
 		log.Warn("TACHYON_DATABASE_URL not set: state is in memory and lost on restart")
 	}
@@ -138,9 +150,22 @@ func main() {
 		MaxDeferral: *maxDeferral,
 		OffPeak:     &telemetry.OffPeak{},
 	}
+	ghClient := &github.Client{AppID: *appID, PrivateKey: key}
+	pbManager := &prebuild.Manager{
+		Source:      &github.PrebuildSource{Client: ghClient},
+		Images:      pins,
+		Registry:    prebuildRegistry{Prebuilds: prebuilds, set: setPrebuildConfig},
+		Builder:     core,
+		Log:         log,
+		MinInterval: *prebuildInterval,
+		NightlyHour: *prebuildNightly,
+		// Warm steps reach only the git host and Tachyon's mirrors.
+		EgressAllowlist: egressHosts("github.com", *npmMirror, *goMirror, *registryMirror),
+	}
+	core.Prebuild = pbManager
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
-		API:           &github.Client{AppID: *appID, PrivateKey: key},
+		API:           ghClient,
 		Secrets:       keys,
 		Log:           log,
 	}
@@ -203,6 +228,7 @@ func main() {
 					}
 				}
 				core.ReconcileReplicas()
+				pbManager.Tick(ctx)
 				if m, ok := keys.(*secrets.Mem); ok {
 					m.Sweep()
 				}
@@ -268,3 +294,27 @@ func loadRollout(trustFile, manifests, canary string) (*images.Rollout, error) {
 	}
 	return r, nil
 }
+
+// egressHosts returns the host of each non-empty URL (or bare host).
+func egressHosts(urls ...string) []string {
+	var out []string
+	for _, u := range urls {
+		if u == "" {
+			continue
+		}
+		if p, err := url.Parse(u); err == nil && p.Host != "" {
+			u = p.Host
+		}
+		out = append(out, u)
+	}
+	return out
+}
+
+// prebuildRegistry gives the prebuild manager SetConfig on top of whichever
+// registry (in memory or Postgres) the control plane runs with.
+type prebuildRegistry struct {
+	controlplane.Prebuilds
+	set func(repo string, c *prebuild.Config)
+}
+
+func (r prebuildRegistry) SetConfig(repo string, c *prebuild.Config) { r.set(repo, c) }

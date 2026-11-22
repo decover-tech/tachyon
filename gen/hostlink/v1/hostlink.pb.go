@@ -1311,8 +1311,18 @@ type PrebuildBuild struct {
 	ScrubPaths   []string               `protobuf:"bytes,4,rep,name=scrub_paths,json=scrubPaths,proto3" json:"scrub_paths,omitempty"`
 	// Egress allowlist while warm steps run; no repo secrets are present.
 	EgressAllowlist []string `protobuf:"bytes,5,rep,name=egress_allowlist,json=egressAllowlist,proto3" json:"egress_allowlist,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Run in the workspace before the warm steps, with clone_token in
+	// $TACHYON_CLONE_TOKEN. They fetch and check out the commit without
+	// writing the token to disk, and fail if .git/config holds credentials.
+	CloneCommands []string `protobuf:"bytes,6,rep,name=clone_commands,json=cloneCommands,proto3" json:"clone_commands,omitempty"`
+	// Short-lived token that can only read this repo's contents. Secret:
+	// never log, never write to host disk, never expose to warm steps.
+	CloneToken []byte `protobuf:"bytes,7,opt,name=clone_token,json=cloneToken,proto3" json:"clone_token,omitempty"`
+	// The key is unchanged and the job disk forks the previous prebuild:
+	// only new git objects are fetched and warm_commands is empty.
+	Refresh       bool `protobuf:"varint,8,opt,name=refresh,proto3" json:"refresh,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PrebuildBuild) Reset() {
@@ -1378,6 +1388,27 @@ func (x *PrebuildBuild) GetEgressAllowlist() []string {
 		return x.EgressAllowlist
 	}
 	return nil
+}
+
+func (x *PrebuildBuild) GetCloneCommands() []string {
+	if x != nil {
+		return x.CloneCommands
+	}
+	return nil
+}
+
+func (x *PrebuildBuild) GetCloneToken() []byte {
+	if x != nil {
+		return x.CloneToken
+	}
+	return nil
+}
+
+func (x *PrebuildBuild) GetRefresh() bool {
+	if x != nil {
+		return x.Refresh
+	}
+	return false
 }
 
 // A job for this repo is likely coming; fork its disk now. hostd holds the
@@ -1797,7 +1828,7 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"\n" +
 	"FilesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\xb1\x01\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\"\x93\x02\n" +
 	"\rPrebuildBuild\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12#\n" +
 	"\rwarm_commands\x18\x02 \x03(\tR\fwarmCommands\x12\x1d\n" +
@@ -1805,7 +1836,11 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"keep_paths\x18\x03 \x03(\tR\tkeepPaths\x12\x1f\n" +
 	"\vscrub_paths\x18\x04 \x03(\tR\n" +
 	"scrubPaths\x12)\n" +
-	"\x10egress_allowlist\x18\x05 \x03(\tR\x0fegressAllowlist\"\xc2\x01\n" +
+	"\x10egress_allowlist\x18\x05 \x03(\tR\x0fegressAllowlist\x12%\n" +
+	"\x0eclone_commands\x18\x06 \x03(\tR\rcloneCommands\x12\x1f\n" +
+	"\vclone_token\x18\a \x01(\fR\n" +
+	"cloneToken\x12\x18\n" +
+	"\arefresh\x18\b \x01(\bR\arefresh\"\xc2\x01\n" +
 	"\aPreFork\x12\x1e\n" +
 	"\vpre_fork_id\x18\x01 \x01(\tR\tpreForkId\x12\x12\n" +
 	"\x04repo\x18\x02 \x01(\tR\x04repo\x120\n" +

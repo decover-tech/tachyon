@@ -339,4 +339,7 @@ func TestAdapterPushAndPRHints(t *testing.T) {
 	if pr.Trust != jobapi.UntrustedFork || pr.Commit != "def" {
 		t.Errorf("pr hint = %+v", pr)
 	}
+	if push.Event != "push" || pr.Event != "pull_request" {
+		t.Errorf("hint events = %q, %q", push.Event, pr.Event)
+	}
 }

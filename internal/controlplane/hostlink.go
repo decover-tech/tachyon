@@ -245,6 +245,7 @@ func (s *HostLink) onJobEvent(ev *hostlinkv1.JobEvent) {
 
 func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 	c := s.Core
+	c.prebuildResult(r)
 	var usage *scheduler.Usage
 	if r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_SUCCEEDED || r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_FAILED {
 		usage = &scheduler.Usage{CPU: r.GetAvgBusyVcpu(), MemGB: r.GetPeakMemoryGb()}

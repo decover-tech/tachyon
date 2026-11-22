@@ -69,6 +69,7 @@ type Core struct {
 	Secrets   SecretResolver
 	Burst     Burst
 	Meter     Meter // optional; bills finished jobs
+	Prebuild  PrebuildManager
 	Mirrors   mirrors.Endpoints
 	CacheURL  string
 	Log       *slog.Logger
@@ -85,6 +86,7 @@ type Core struct {
 	Store store.Store
 
 	mu       sync.Mutex
+	pbJobs   map[string]string // prebuild build job ID -> repo (prebuilds.go)
 	hosts    map[string]*hostConn
 	hints    map[string]hintEntry // repo@commit -> changed files
 	deferred []jobapi.Submission
@@ -154,6 +156,7 @@ func (c *Core) Hint(ctx context.Context, h jobapi.Hint) error {
 		}
 	}
 	c.mu.Unlock()
+	c.prebuildHint(ctx, h)
 
 	repo := shortRepo(h.Repo)
 	snap, _ := c.Prebuilds.Latest(repo)

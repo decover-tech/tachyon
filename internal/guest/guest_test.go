@@ -223,9 +223,12 @@ func TestPayloadMatchesHostdWireFormat(t *testing.T) {
 		},
 		Disks: []Disk{{Serial: "job", Mount: "/"}, {Serial: "sticky-docker", Mount: "/var/lib/docker"}},
 		Prebuild: &Prebuild{
-			WarmCommands: []string{"npm ci", "go mod download"},
-			KeepPaths:    []string{"node_modules", "~/.npm"},
-			ScrubPaths:   []string{".npmrc", ".docker/config.json"},
+			WarmCommands:  []string{"npm ci", "go mod download"},
+			KeepPaths:     []string{"node_modules", "~/.npm"},
+			ScrubPaths:    []string{".npmrc", ".docker/config.json"},
+			CloneCommands: []string{"git init -q", "git fetch --depth 1 origin abc"},
+			CloneTokenB64: "ZmFrZS1jbG9uZS10b2tlbg==",
+			Refresh:       true,
 		},
 	}
 	if !reflect.DeepEqual(p, want) {
@@ -552,6 +555,49 @@ func TestPrebuild(t *testing.T) {
 		t.Error("workspace not owned by the runner user")
 	}
 	assertNoSecretOnDisk(t, e.dir)
+}
+
+func TestPrebuildCloneTokenOnlyReachesCloneSteps(t *testing.T) {
+	e := newTestEnv(t)
+	p := prebuildPayload()
+	p.Prebuild.CloneCommands = []string{"git fetch origin"}
+	p.Prebuild.CloneTokenB64 = base64.StdEncoding.EncodeToString([]byte("clone-secret-token"))
+
+	res := e.agent.Run(context.Background(), p)
+
+	if res.ExitCode != 0 {
+		t.Fatalf("exit code %d\n%s", res.ExitCode, e.logs)
+	}
+	var cmds []string
+	for _, c := range e.sys.runs {
+		cmd := c.Args[len(c.Args)-1]
+		cmds = append(cmds, cmd)
+		hasToken := slices.Contains(c.Env, "TACHYON_CLONE_TOKEN=clone-secret-token")
+		if want := cmd == "git fetch origin"; hasToken != want {
+			t.Errorf("%q: clone token present = %v, want %v", cmd, hasToken, want)
+		}
+	}
+	if !slices.Equal(cmds, []string{"git fetch origin", "npm ci", "go mod download"}) {
+		t.Errorf("steps = %q (clone first, then warm)", cmds)
+	}
+	if strings.Contains(e.logs.String(), "clone-secret-token") {
+		t.Error("clone token logged")
+	}
+}
+
+func TestPrebuildCloneFailureSkipsWarmSteps(t *testing.T) {
+	e := newTestEnv(t)
+	e.sys.run = func(c Command) (int, error) { return 9, nil }
+	p := prebuildPayload()
+	p.Prebuild.CloneCommands = []string{"git fetch origin"}
+	p.Prebuild.CloneTokenB64 = base64.StdEncoding.EncodeToString([]byte("t"))
+	res := e.agent.Run(context.Background(), p)
+	if res.ExitCode != 9 {
+		t.Fatalf("exit code %d", res.ExitCode)
+	}
+	if len(e.sys.runs) != 1 {
+		t.Errorf("ran %d steps after a failed clone", len(e.sys.runs))
+	}
 }
 
 func TestPrebuildWarmStepFails(t *testing.T) {

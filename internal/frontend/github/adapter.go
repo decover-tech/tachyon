@@ -376,6 +376,7 @@ func (a *Adapter) onPush(ctx context.Context, e pushEvent) error {
 		Repo:         "github.com/" + e.Repository.FullName,
 		Commit:       e.After,
 		Ref:          e.Ref,
+		Event:        "push",
 		ChangedFiles: changed,
 		Trust:        trust,
 		ReceivedAt:   a.now(),
@@ -397,6 +398,7 @@ func (a *Adapter) onPullRequest(ctx context.Context, e pullRequestEvent) error {
 		Repo:       "github.com/" + e.Repository.FullName,
 		Commit:     e.PullRequest.Head.SHA,
 		Ref:        "refs/heads/" + e.PullRequest.Head.Ref,
+		Event:      "pull_request",
 		Trust:      trust,
 		ReceivedAt: a.now(),
 	})

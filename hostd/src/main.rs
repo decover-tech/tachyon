@@ -9,12 +9,12 @@ pub mod hypervisor;
 pub mod jailer;
 pub mod lifecycle;
 pub mod link;
-pub mod rootfs;
 pub mod network;
-pub mod prefork;
-pub mod replicate;
 pub mod outbox;
+pub mod prefork;
 pub mod recovery;
+pub mod replicate;
+pub mod rootfs;
 pub mod storage;
 pub mod tls;
 

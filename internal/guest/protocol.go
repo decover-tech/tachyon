@@ -49,6 +49,15 @@ type Prebuild struct {
 	WarmCommands []string `json:"warm_commands"`
 	KeepPaths    []string `json:"keep_paths"`
 	ScrubPaths   []string `json:"scrub_paths"`
+	// CloneCommands fetch and check out the repo in the workspace before the
+	// warm steps. The clone token is in $TACHYON_CLONE_TOKEN for these
+	// commands only, never for the warm steps.
+	CloneCommands []string `json:"clone_commands,omitempty"`
+	// CloneTokenB64 is the short-lived read-only clone token, base64. Secret.
+	CloneTokenB64 string `json:"clone_token_b64,omitempty"`
+	// Refresh: the disk is a fork of the previous prebuild; the clone
+	// commands fetch only new objects.
+	Refresh bool `json:"refresh,omitempty"`
 }
 
 // Result is the agent's final report.

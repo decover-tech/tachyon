@@ -26,8 +26,8 @@ use std::time::{Duration, SystemTime};
 use crate::hypervisor::{GuestDisk, GuestPayload, GuestPrebuild, GuestStop, Hypervisor};
 use crate::network::EgressPolicy;
 use crate::pb;
-use crate::rootfs;
 use crate::prefork::PreForks;
+use crate::rootfs;
 use crate::storage::{self, Storage};
 
 /// Max job wall time, matching GitHub-hosted runners.
@@ -297,6 +297,9 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                     warm_commands: b.warm_commands.clone(),
                     keep_paths: b.keep_paths.clone(),
                     scrub_paths: b.scrub_paths.clone(),
+                    clone_commands: b.clone_commands.clone(),
+                    clone_token_b64: base64_encode(&b.clone_token),
+                    refresh: b.refresh,
                 });
             }
             // Don't hand the runner its config if the job is already
@@ -555,6 +558,34 @@ mod tests {
             "acme/api",
             "kept snapshots are labeled for restart recovery"
         );
+    }
+
+    #[test]
+    fn prebuild_build_passes_clone_to_guest() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        let mut j = job(pb::Trust::Trusted);
+        j.guest.as_mut().unwrap().runner_config.clear();
+        j.prebuild_build = Some(pb::PrebuildBuild {
+            key: "pb1-abc".into(),
+            warm_commands: vec!["npm ci".into()],
+            clone_commands: vec!["git init -q .".into()],
+            clone_token: b"ghs_secret".to_vec(),
+            refresh: true,
+            ..Default::default()
+        });
+        let r = a.run_job(&j, &|_| {});
+        assert_eq!(r.outcome(), Outcome::Succeeded, "{}", r.error);
+        let payloads = a.hv.payloads.lock().unwrap();
+        let p = payloads[0].prebuild.as_ref().unwrap();
+        assert_eq!(p.clone_commands, vec!["git init -q .".to_string()]);
+        assert_eq!(p.clone_token_b64, base64_encode(b"ghs_secret"));
+        assert!(p.refresh);
+        assert!(
+            !payloads[0].env.values().any(|v| v.contains("ghs_secret")),
+            "clone token leaked into the guest env"
+        );
+        let shown = format!("{p:?}");
+        assert!(!shown.contains("ghs_secret") && !shown.contains(&p.clone_token_b64));
     }
 
     #[test]
