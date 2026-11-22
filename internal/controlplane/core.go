@@ -89,6 +89,17 @@ type Core struct {
 	// CacheSigner mints per-job cache tokens; nil sends no token.
 	CacheSigner *cache.Signer
 
+	// MirrorPair, if set, overrides Mirrors with the region's
+	// health-checked mirror pair (zero Endpoints = upstream).
+	MirrorPair interface{ Endpoints() mirrors.Endpoints }
+	// GitMirrored reports whether a repo (owner/name) is public and served
+	// by the region's git mirror. Only those repos get the git insteadOf
+	// rewrite: a private repo routed through the mirror would be
+	// redirected to GitHub without the checkout token (git scopes
+	// http.https://github.com/.extraheader to the rewritten mirror URL),
+	// and a repo the mirror doesn't serve gains nothing. nil means none.
+	GitMirrored func(repo string) bool
+
 	mu       sync.Mutex
 	pbJobs   map[string]string // prebuild build job ID -> repo (prebuilds.go)
 	hosts    map[string]*hostConn
@@ -368,7 +379,11 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 		return nil, fmt.Errorf("resolve runner config: %w", err)
 	}
 
-	env := c.Mirrors.Env()
+	mir := c.Mirrors
+	if c.MirrorPair != nil {
+		mir = c.MirrorPair.Endpoints()
+	}
+	env := mir.Env()
 	env["TACHYON_JOB_ID"] = spec.JobID
 	env["TACHYON_PREBUILD_MATCH"] = string(fork.Match)
 	if cfg != nil && fork.Snapshot != nil {
@@ -384,19 +399,25 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 		env[k] = v
 	}
 	files := map[string][]byte{}
-	if b, err := c.Mirrors.DockerDaemonConfig(nil); err == nil && c.Mirrors.Registry != "" {
+	if b, err := mir.DockerDaemonConfig(nil); err == nil && mir.Registry != "" {
 		files["/etc/docker/daemon.json"] = b
 	}
-	if s := c.Mirrors.AptConf(); s != "" {
+	for p, s := range mir.ContainerdHosts() {
+		files[p] = []byte(s)
+	}
+	if s := mir.AptConf(); s != "" {
 		files["/etc/apt/apt.conf.d/01tachyon-proxy"] = []byte(s)
 	}
-	if s := c.Mirrors.GradleInit(); s != "" {
+	if s := mir.GradleInit(); s != "" {
 		files["~/.gradle/init.d/tachyon.gradle"] = []byte(s)
 	}
-	if s := c.Mirrors.MavenSettings(); s != "" {
+	if s := mir.MavenSettings(); s != "" {
 		files["~/.m2/settings.xml"] = []byte(s)
 	}
-	if s := c.Mirrors.GitConfig([]string{repo}); s != "" {
+	if c.GitMirrored == nil || !c.GitMirrored(repo) {
+		mir.Git = ""
+	}
+	if s := mir.GitConfig([]string{repo}); s != "" {
 		files["/etc/gitconfig.d/tachyon"] = []byte(s)
 	}
 

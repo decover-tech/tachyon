@@ -16,6 +16,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `cmd/tachyon/` | Go | Developer CLI: `tachyon prebuild validate`, `tachyon prebuild key`, `tachyon hostcert` |
 | `cmd/tachyon-guest/` | Go | Guest agent inside each job VM: takes the job payload from hostd over vsock (port 1024), mounts disks, runs the GitHub runner or prebuild warm steps, reports back and powers off. Linux only |
 | `internal/hostauth/` | Go | Hostlink mTLS: server TLS config, host identity from client certificates, development certificate issuance |
+| `cmd/tachyon-mirror/` | Go | Regional pull-through package mirror (registry, npm, PyPI, Go, Maven, apt, git), run as a health-checked pair |
 | `internal/jobapi/` | Go | Platform-neutral job spec. Nothing below it knows about GitHub |
 | `internal/frontend/github/` | Go | GitHub Actions adapter: labels, trust derivation, webhook verification, repo-scoped JIT runners, reconcile loop, minimal App REST client |
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
@@ -24,7 +25,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `cmd/tachyon-cache/` | Go | Regional Actions cache service (GitHub-compatible Twirp API + signed blob URLs) |
 | `internal/cache/` | Go | Actions cache: Twirp protocol server, signed blob URLs and per-job tokens, scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction, `BlobStore` interface for the D4 object store |
 | `internal/guest/` | Go | The guest agent's logic and its vsock wire format (golden files shared with hostd's tests), behind a `System` interface so it tests without a VM |
-| `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
+| `internal/mirrors/` | Go | Guest configuration for package mirrors, and the control plane's health check of each region's mirror pair. `proxy/` and `gitmirror/` are the mirror itself |
 | `internal/images/` | Go | Base image pipeline: build plan from the runner-images Packer template, manifest, ed25519 signing, SPDX SBOM, canary-first rollout and version retention |
 | `cmd/tachyon-image/` | Go | Pipeline tool `images/*/build.sh` calls: `plan`, `sbom`, `manifest`, `sign`, `verify`, `diff` |
 | `images/ubuntu-24.04/` | – | `image.yml` (pinned runner-images commit, trims) and `build.sh` (Linux builder: ext4 image, SBOM, unsigned manifest); rebuilt weekly by `.github/workflows/base-image.yml`, which signs the manifest in a separate job that never runs build code |
@@ -94,6 +95,21 @@ Set `TACHYON_DATABASE_URL` (e.g. `postgres://tachyon@db:5432/tachyon`) to keep j
 
 The nightly clean run is off unless repos opt in with `-nightly-repos owner/name,...`. Each night after `-nightly-hour` (UTC, default 3; `-1` disables it) the control plane re-runs each opted-in repo's default-branch run for its newest commit without a prebuild and reports divergence as a `Tachyon nightly clean run` check on the commit. The re-run repeats every job of that workflow run, non-Tachyon and deploy jobs included, so opt in only repos where that is safe. This needs the App's Actions (write) and Checks (write) permissions.
 
+### Running the package mirrors
+
+Run two `tachyon-mirror` instances per region, on separate machines:
+
+```sh
+bin/tachyon-mirror -listen :443 -data /var/cache/tachyon-mirror \
+  -public-url https://mirror-a.r1.tachyon.internal \
+  -tls-cert mirror.pem -tls-key mirror-key.pem \
+  -git-repos acme/api,acme/web
+```
+
+and point the control plane at both with `-mirror-primary https://mirror-a.r1.tachyon.internal -mirror-secondary https://mirror-b.r1.tachyon.internal -mirror-git-repos acme/api,acme/web`. `-git-repos` and `-mirror-git-repos` must list the same repos, and only public ones: jobs for any other repo, including every private repo, get no git rewrite and fetch from GitHub directly with actions/checkout's token. It probes `/healthz` on each every 5 seconds; new jobs use the primary while it is up, then the secondary, and get no mirror config at all (straight to upstream) if both are down. Docker requires TLS for registry mirrors.
+
+Only public content is mirrored: the mirror fetches upstream anonymously, requests that carry credentials pass straight through uncached, private images get a 404 so the client falls back to the registry, the apt proxy only serves public Ubuntu/Debian archives, and the git mirror redirects any repo it can't clone anonymously to GitHub.
+
 ### Running hostd (Linux host)
 
 | Variable | Required | Default |
@@ -134,6 +150,7 @@ Not built yet:
 - **Prebuild manager.** Triggering builds on trusted pushes and nightly, and the host-side secret scan.
 - **Prebuild manager in production.** Triggers, planning and dispatch exist, but trigger state is in memory and no build has run on a real host.
 - **Actions cache protocol server** and its object store (D4). Only the scoping and index rules exist.
+- **Mirror rollout.** `tachyon-mirror` is built and tested against fake upstreams only; provisioning the instances, TLS certificates, and feeding the git mirror the list of repos Tachyon builds (a flag for now) are not done.
 - **Secrets persistence.** Control plane state is in Postgres, but secrets (JIT runner configs) are still in memory until a managed key store lands; after a restart, jobs whose JIT config was lost are re-dispatched by the adapter's reconcile loop.
 - **Host certificate issuer** backed by the key store, and on-host renewal. mTLS and host identity checks on the host link are built; only the `tachyon hostcert` development issuer exists.
 - **Observability export** (OpenTelemetry/Prometheus/ClickHouse) and billing.

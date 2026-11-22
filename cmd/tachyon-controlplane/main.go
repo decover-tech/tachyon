@@ -31,6 +31,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/hostauth"
 	"github.com/decover-tech/tachyon/internal/images"
 	"github.com/decover-tech/tachyon/internal/mirrors"
+	"github.com/decover-tech/tachyon/internal/mirrors/gitmirror"
 	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/scheduler"
 	"github.com/decover-tech/tachyon/internal/secrets"
@@ -69,6 +70,9 @@ func main() {
 	prebuildNightly := flag.Int("prebuild-nightly-hour", 3, "UTC hour after which each repo's nightly prebuild refresh runs")
 	nightlyHour := flag.Int("nightly-hour", 3, "UTC hour after which each opted-in repo's nightly clean run starts; -1 disables it")
 	nightlyRepos := flag.String("nightly-repos", "", "comma-separated owner/name repos opted in to the nightly clean run, which re-runs every job of a default-branch workflow run (deploy jobs too) and needs the App's actions:write and checks:write permissions; empty disables it")
+	mirrorPrimary := flag.String("mirror-primary", "", "primary tachyon-mirror base URL; with -mirror-secondary, health-checked and overrides the static -mirror-* flags")
+	mirrorSecondary := flag.String("mirror-secondary", "", "secondary tachyon-mirror base URL")
+	gitRepos := flag.String("mirror-git-repos", "", "comma-separated public owner/name repos the mirrors' -git-repos serve; only jobs for these repos fetch git through the mirror (never list private repos)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -163,11 +167,23 @@ func main() {
 		MinInterval: *prebuildInterval,
 		NightlyHour: *prebuildNightly,
 		// Warm steps reach only the git host and Tachyon's mirrors.
-		EgressAllowlist: egressHosts("github.com", *npmMirror, *goMirror, *registryMirror),
+		EgressAllowlist: egressHosts("github.com", *npmMirror, *goMirror, *registryMirror, *mirrorPrimary, *mirrorSecondary),
 	}
 	core.Prebuild = pbManager
 	if k := os.Getenv("TACHYON_CACHE_KEY"); k != "" {
 		core.CacheSigner = &cache.Signer{Key: []byte(k)}
+	}
+	if *mirrorPrimary != "" || *mirrorSecondary != "" {
+		mon := &mirrors.Monitor{
+			Primary: *mirrorPrimary, Secondary: *mirrorSecondary,
+			Prober: mirrors.HTTPProber{Client: &http.Client{Timeout: 5 * time.Second}},
+			Log:    log,
+		}
+		core.MirrorPair = mon
+		if *gitRepos != "" {
+			core.GitMirrored = gitmirror.AllowList(strings.Split(*gitRepos, ","))
+		}
+		go mon.Run(ctx, 5*time.Second)
 	}
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
