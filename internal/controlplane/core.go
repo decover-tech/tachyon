@@ -13,6 +13,7 @@ import (
 	"time"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/cache"
 	"github.com/decover-tech/tachyon/internal/jobapi"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/prebuild"
@@ -84,6 +85,9 @@ type Core struct {
 	OffPeak *telemetry.OffPeak
 	// Store, if set, persists jobs, hosts and job records (see persist.go).
 	Store store.Store
+
+	// CacheSigner mints per-job cache tokens; nil sends no token.
+	CacheSigner *cache.Signer
 
 	mu       sync.Mutex
 	pbJobs   map[string]string // prebuild build job ID -> repo (prebuilds.go)
@@ -370,8 +374,14 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 	if cfg != nil && fork.Snapshot != nil {
 		env["TACHYON_WARM_PATHS"] = strings.Join(cfg.WorkspacePaths(), ":")
 	}
-	if c.CacheURL != "" {
-		env["TACHYON_CACHE_URL"] = c.CacheURL
+	cacheEnv, err := cache.GuestEnv(c.CacheURL, c.CacheSigner, spec)
+	if err != nil {
+		// No token means no cache service for this job; actions/cache
+		// treats that as a miss, so the job still runs.
+		c.log().Warn("cache token", "job", spec.JobID, "err", err)
+	}
+	for k, v := range cacheEnv {
+		env[k] = v
 	}
 	files := map[string][]byte{}
 	if b, err := c.Mirrors.DockerDaemonConfig(nil); err == nil && c.Mirrors.Registry != "" {

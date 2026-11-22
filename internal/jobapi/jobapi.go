@@ -154,6 +154,12 @@ type Spec struct {
 	Volumes   []Volume    `yaml:"volumes" json:"volumes"`
 	Bootstrap Bootstrap   `yaml:"bootstrap" json:"bootstrap"`
 	Trust     Trust       `yaml:"trust" json:"trust"`
+	// Git refs that scope the job's Actions cache entries. Optional: a job
+	// without them gets a cache scope of its own. Ref is refs/heads/<b> or,
+	// for pull requests, refs/pull/<n>/merge with BaseRef the target branch.
+	Ref           string `yaml:"ref,omitempty" json:"ref,omitempty"`
+	BaseRef       string `yaml:"base_ref,omitempty" json:"base_ref,omitempty"`
+	DefaultBranch string `yaml:"default_branch,omitempty" json:"default_branch,omitempty"` // refs/heads/main
 }
 
 // Validate checks the fields the core relies on.

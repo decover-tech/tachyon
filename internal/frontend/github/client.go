@@ -179,6 +179,13 @@ func (c *Client) RunContext(ctx context.Context, inst int64, repo string, runID 
 			FullName      string `json:"full_name"`
 			DefaultBranch string `json:"default_branch"`
 		} `json:"repository"`
+		// Empty for pull requests from forks.
+		PullRequests []struct {
+			Number int `json:"number"`
+			Base   struct {
+				Ref string `json:"ref"`
+			} `json:"base"`
+		} `json:"pull_requests"`
 	}
 	if err := c.asInstallation(ctx, inst, http.MethodGet, fmt.Sprintf("/repos/%s/actions/runs/%d", repo, runID), nil, &run); err != nil {
 		return RunContext{}, err
@@ -189,6 +196,9 @@ func (c *Client) RunContext(ctx context.Context, inst int64, repo string, runID 
 		HeadRepo:      run.HeadRepository.FullName,
 		BaseRepo:      run.Repository.FullName,
 		DefaultBranch: run.Repository.DefaultBranch,
+	}
+	if len(run.PullRequests) > 0 {
+		rc.PRNumber, rc.BaseBranch = run.PullRequests[0].Number, run.PullRequests[0].Base.Ref
 	}
 	if rc.HeadBranch != "" && rc.HeadRepo == rc.BaseRepo {
 		var br struct {

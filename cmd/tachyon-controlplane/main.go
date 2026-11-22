@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/cache"
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/hostauth"
@@ -165,6 +166,9 @@ func main() {
 		EgressAllowlist: egressHosts("github.com", *npmMirror, *goMirror, *registryMirror),
 	}
 	core.Prebuild = pbManager
+	if k := os.Getenv("TACHYON_CACHE_KEY"); k != "" {
+		core.CacheSigner = &cache.Signer{Key: []byte(k)}
+	}
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
 		API:           ghClient,

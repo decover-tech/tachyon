@@ -12,6 +12,10 @@ type RunContext struct {
 	BaseRepo      string // owner/name the workflow runs in
 	DefaultBranch string
 	Protected     bool // HeadBranch is a protected branch of BaseRepo
+	// For pull request events: the PR number and target branch, when the
+	// run API lists them (it doesn't for forks).
+	PRNumber   int
+	BaseBranch string
 }
 
 // DeriveTrust: default and protected branches are trusted, same-repo pull

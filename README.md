@@ -21,7 +21,8 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
 | `internal/scheduler/` | Go | Placement by prebuild locality, packing by measured usage, CPU oversubscription with automatic step-back, deferrable class |
 | `internal/prebuild/` | Go | `.tachyon/prebuild.yml`, prebuild keys, full/partial/none fork planning, credential scrub list, and the prebuild manager: push/nightly triggers, refresh vs. full warm-up, token-free clone commands |
-| `internal/cache/` | Go | Actions cache scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction |
+| `cmd/tachyon-cache/` | Go | Regional Actions cache service (GitHub-compatible Twirp API + signed blob URLs) |
+| `internal/cache/` | Go | Actions cache: Twirp protocol server, signed blob URLs and per-job tokens, scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction, `BlobStore` interface for the D4 object store |
 | `internal/guest/` | Go | The guest agent's logic and its vsock wire format (golden files shared with hostd's tests), behind a `System` interface so it tests without a VM |
 | `internal/mirrors/` | Go | Guest configuration for package mirrors (npm, PyPI, Go, Maven/Gradle, apt, registry, git) |
 | `internal/images/` | Go | Base image pipeline: build plan from the runner-images Packer template, manifest, ed25519 signing, SPDX SBOM, canary-first rollout and version retention |
