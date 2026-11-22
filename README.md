@@ -21,6 +21,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/frontend/github/` | Go | GitHub Actions adapter: labels, trust derivation, webhook verification, repo-scoped JIT runners, reconcile loop, minimal App REST client |
 | `internal/controlplane/` | Go | Job API core: fork planning, placement, dispatch over hostlink, phase records |
 | `internal/scheduler/` | Go | Placement by prebuild locality, packing by measured usage, CPU oversubscription with automatic step-back, deferrable class |
+| `internal/burst/` | Go | Burst capacity when owned hosts are full: cheapest on-demand or hourly bare-metal offer, spot only for short profiles, spill to the next region. Cloud APIs sit behind `burst.Provider` |
 | `internal/prebuild/` | Go | `.tachyon/prebuild.yml`, prebuild keys, full/partial/none fork planning, credential scrub list, and the prebuild manager: push/nightly triggers, refresh vs. full warm-up, token-free clone commands |
 | `cmd/tachyon-cache/` | Go | Regional Actions cache service (GitHub-compatible Twirp API + signed blob URLs) |
 | `internal/cache/` | Go | Actions cache: Twirp protocol server, signed blob URLs and per-job tokens, scoping (default branch / PR / fork rules), restore-key lookup, per-repo quota with LRU eviction, `BlobStore` interface for the D4 object store |

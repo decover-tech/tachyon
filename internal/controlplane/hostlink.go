@@ -249,6 +249,9 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 	var usage *scheduler.Usage
 	if r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_SUCCEEDED || r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_FAILED {
 		usage = &scheduler.Usage{CPU: r.GetAvgBusyVcpu(), MemGB: r.GetPeakMemoryGb()}
+		if rec := c.Record(r.GetJobId()); rec != nil {
+			usage.Duration, _ = rec.Billable()
+		}
 	}
 	c.Scheduler.Release(r.GetJobId(), usage)
 	c.meterJob(r)

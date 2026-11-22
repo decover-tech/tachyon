@@ -336,6 +336,28 @@ func TestJobResultReleasesAndRegistersPrebuild(t *testing.T) {
 	}
 }
 
+func TestJobResultFeedsDurationToProfile(t *testing.T) {
+	e := newEnv()
+	profiles := &scheduler.Profiles{MinSamples: 1}
+	e.core.Scheduler = scheduler.New(profiles)
+	s := e.connect(t, "h1", "us", 4, 16)
+	s.push(t, heartbeat(false))
+
+	if err := e.core.Submit(context.Background(), e.submission(t, "j1", 4)); err != nil {
+		t.Fatal(err)
+	}
+	s.next(t)
+	start := time.Now()
+	e.core.Record("j1").Mark(telemetry.VMResumed, start)
+	e.core.Record("j1").Mark(telemetry.JobFinished, start.Add(3*time.Minute))
+	s.push(t, &hostlinkv1.LinkRequest{Msg: &hostlinkv1.LinkRequest_JobResult{JobResult: &hostlinkv1.JobResult{
+		JobId: "j1", Outcome: hostlinkv1.JobResult_OUTCOME_SUCCEEDED, AvgBusyVcpu: 1, PeakMemoryGb: 2,
+	}}})
+	if prof, ok := profiles.Get("acme/api/CI/test"); !ok || prof.P95Duration != 3*time.Minute {
+		t.Fatalf("profile = %+v ok=%v", prof, ok)
+	}
+}
+
 type fakeBurst struct{ subs []jobapi.Submission }
 
 func (b *fakeBurst) Submit(_ context.Context, s jobapi.Submission) error {
