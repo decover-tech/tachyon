@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"path"
 	"time"
 )
 
@@ -88,6 +89,49 @@ type Volume struct {
 // filesystem, not the overlay.
 var DockerVolume = Volume{Kind: VolumeSticky, Key: "docker", Mount: "/var/lib/docker"}
 
+// WithDockerVolume returns vols with DockerVolume appended unless some volume
+// is already mounted at /var/lib/docker. The guest's root is an overlay, and
+// Docker's overlay2 storage driver cannot run on top of one, so every job
+// gets the docker sticky volume whether or not its spec asked for it.
+func WithDockerVolume(vols []Volume) []Volume {
+	for _, v := range vols {
+		if path.Clean(v.Mount) == DockerVolume.Mount {
+			return vols
+		}
+	}
+	out := make([]Volume, 0, len(vols)+1)
+	out = append(out, vols...)
+	return append(out, DockerVolume)
+}
+
+// validateVolumes checks that every mount is an absolute, clean path other
+// than the root (the root is the overlay), that the reserved docker key is
+// used only at /var/lib/docker, and that keys and mounts are unique. These
+// are the same rules hostd's plan_volumes (hostd/src/rootfs.rs) enforces.
+func validateVolumes(vols []Volume) error {
+	keys := map[string]bool{}
+	mounts := map[string]bool{}
+	for _, v := range vols {
+		switch {
+		case v.Key == "":
+			return fmt.Errorf("volume key required (mount %q)", v.Mount)
+		case !path.IsAbs(v.Mount) || path.Clean(v.Mount) != v.Mount:
+			return fmt.Errorf("volume %q: mount %q must be a clean absolute path", v.Key, v.Mount)
+		case v.Mount == "/":
+			return fmt.Errorf("volume %q: cannot mount over the overlay root", v.Key)
+		case v.Key == DockerVolume.Key && v.Mount != DockerVolume.Mount:
+			return fmt.Errorf("volume key %q is reserved for %s, not %q", DockerVolume.Key, DockerVolume.Mount, v.Mount)
+		case keys[v.Key]:
+			return fmt.Errorf("duplicate volume key %q", v.Key)
+		case mounts[v.Mount]:
+			return fmt.Errorf("duplicate volume mount %q", v.Mount)
+		}
+		keys[v.Key] = true
+		mounts[v.Mount] = true
+	}
+	return nil
+}
+
 type BootstrapKind string
 
 const BootstrapGitHubRunner BootstrapKind = "github-runner"
@@ -130,6 +174,9 @@ func (s Spec) Validate() error {
 	case Trusted, Untrusted, UntrustedFork:
 	default:
 		return fmt.Errorf("spec %s: invalid trust %q", s.JobID, s.Trust)
+	}
+	if err := validateVolumes(s.Volumes); err != nil {
+		return fmt.Errorf("spec %s: %w", s.JobID, err)
 	}
 	return nil
 }

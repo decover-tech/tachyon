@@ -295,7 +295,8 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 	}
 
 	var vols []*hostlinkv1.Volume
-	for _, v := range spec.Volumes {
+	// /var/lib/docker is always a sticky volume, never on the overlay root.
+	for _, v := range jobapi.WithDockerVolume(spec.Volumes) {
 		src := ""
 		if ref, ok := c.hostSticky(a.HostID, repo, v.Key); ok {
 			src = ref.GetId()

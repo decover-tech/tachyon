@@ -370,3 +370,23 @@ func TestShortRepo(t *testing.T) {
 		}
 	}
 }
+
+func TestAssignAlwaysHasDockerVolume(t *testing.T) {
+	e := newEnv()
+	s := e.connect(t, "h1", "us", 16, 64)
+	s.push(t, heartbeat(false))
+
+	sub := e.submission(t, "j1", 4)
+	sub.Spec.Volumes = nil // the spec left it out; the core adds it anyway
+	if err := e.core.Submit(context.Background(), sub); err != nil {
+		t.Fatal(err)
+	}
+	a := s.next(t).GetAssign()
+	if a == nil {
+		t.Fatal("expected AssignJob")
+	}
+	v := a.GetVolumes()
+	if len(v) != 1 || v[0].GetKey() != "docker" || v[0].GetMount() != "/var/lib/docker" {
+		t.Errorf("volumes = %v", v)
+	}
+}
