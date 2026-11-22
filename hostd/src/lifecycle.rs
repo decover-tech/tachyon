@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::hypervisor::{GuestDisk, GuestPayload, GuestPrebuild, GuestStop, Hypervisor};
+use crate::network::EgressPolicy;
 use crate::pb;
 use crate::rootfs;
 use crate::storage::{self, Storage};
@@ -242,6 +243,9 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         let mut vm = self.take_vm(job.vcpu, job.memory_gb)?;
         let run = (|| -> Result<pb::job_result::Outcome> {
             self.hv.set_cpu_weight(&mut vm, job.cpu_weight.max(1))?;
+            self.hv
+                .set_egress(&mut vm, &EgressPolicy::for_job(job))
+                .context("apply egress policy")?;
             self.hv.resume(&mut vm)?;
             events(pb::Phase::VmResumed);
 
@@ -686,6 +690,32 @@ mod tests {
             .unwrap()
             .iter()
             .all(|l| !l.starts_with("clone") && !l.starts_with("create")));
+    }
+
+    #[test]
+    fn egress_policy_set_before_resume() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        a.run_job(&job(pb::Trust::Untrusted), &|_| {});
+        let mut j = job(pb::Trust::Trusted);
+        j.prebuild_build = Some(pb::PrebuildBuild {
+            key: "k".into(),
+            egress_allowlist: vec!["github.com:443".into()],
+            ..Default::default()
+        });
+        a.run_job(&j, &|_| {});
+        let got = a.hv.egress.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![
+                (EgressPolicy::Open, false),
+                (
+                    EgressPolicy::Restricted {
+                        allow: vec!["github.com:443".into()]
+                    },
+                    false
+                ),
+            ]
+        );
     }
 
     #[test]

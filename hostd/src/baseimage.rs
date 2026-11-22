@@ -449,6 +449,8 @@ impl SnapshotBuilder for ChSnapshotBuilder {
             cpu_weight: 100 * spec.vcpu,
             memory_max_bytes: (u64::from(spec.memory_gb) << 30) + (512 << 20),
             bind: Some((dir.clone(), PathBuf::from(IN_JAIL_DIR))),
+            // Image preparation boots offline.
+            netns: None,
         };
         jail.create_cgroup()?;
         let mut cmd = Command::new(&self.binary);

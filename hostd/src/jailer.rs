@@ -1,5 +1,6 @@
 //! Per-VM jail: every hypervisor process runs as its own unprivileged user,
-//! in its own cgroup and mount/IPC/UTS namespaces. Cloud Hypervisor applies
+//! in its own cgroup, its own network namespace (see `network`) and its own
+//! mount/IPC/UTS namespaces. Cloud Hypervisor applies
 //! its own seccomp filters (`--seccomp true`, the default) on top.
 //!
 //! Doing this in Go would fight the multithreaded runtime (runc carries a C
@@ -25,6 +26,9 @@ pub struct JailSpec {
     /// give every VM the same in-jail path for its sockets and disks, since
     /// a restored snapshot reuses the paths it was created with.
     pub bind: Option<(PathBuf, PathBuf)>,
+    /// Network namespace to join (e.g. /run/netns/tachyon-vm3), so the VMM
+    /// opens its tap there and never sees the host's interfaces.
+    pub netns: Option<PathBuf>,
 }
 
 impl JailSpec {
@@ -83,6 +87,10 @@ fn apply_os(spec: &JailSpec, cmd: &mut Command, procs: PathBuf) -> Result<()> {
         )),
         None => None,
     };
+    let netns = match &spec.netns {
+        Some(p) => Some(CString::new(p.as_os_str().as_bytes())?),
+        None => None,
+    };
     // SAFETY: only async-signal-safe libc calls between fork and exec.
     unsafe {
         cmd.pre_exec(move || {
@@ -96,6 +104,17 @@ fn apply_os(spec: &JailSpec, cmd: &mut Command, procs: PathBuf) -> Result<()> {
             libc::close(fd);
             if n < 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if let Some(ns) = &netns {
+                let fd = libc::open(ns.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let rc = libc::setns(fd, libc::CLONE_NEWNET);
+                libc::close(fd);
+                if rc != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             if libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -167,6 +186,7 @@ mod tests {
             cpu_weight: 0,
             memory_max_bytes: 8 << 30,
             bind: None,
+            netns: None,
         };
         let dir = spec.create_cgroup().unwrap();
         assert_eq!(dir, tmp.path().join("vm-gh_1"));

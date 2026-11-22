@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::jailer::{slot_ids, JailSpec};
 use crate::rootfs::{self, GuestRoot};
+use crate::network::{EgressPolicy, HostNetwork, VmLink};
 
 /// What the guest agent receives over vsock before the runner starts.
 /// Debug and Display both omit the runner config.
@@ -126,6 +127,8 @@ pub trait Hypervisor: Send + Sync {
     fn restore_paused(&self, vcpu: u32, memory_gb: u32) -> Result<Self::Vm>;
     /// Applies the job's CPU weight to a VM taken from the warm pool.
     fn set_cpu_weight(&self, vm: &mut Self::Vm, weight: u32) -> Result<()>;
+    /// Replaces the VM's egress policy. Called before resume.
+    fn set_egress(&self, vm: &mut Self::Vm, policy: &EgressPolicy) -> Result<()>;
     fn resume(&self, vm: &mut Self::Vm) -> Result<()>;
     /// Hot-plugs a block device.
     fn attach_disk(&self, vm: &mut Self::Vm, serial: &str, device: &str) -> Result<()>;
@@ -154,6 +157,8 @@ pub struct CloudHypervisor {
     pub cgroup_parent: PathBuf,
     pub base_uid: u32,
     pub next_slot: AtomicU32,
+    /// Per-VM network namespaces, taps and egress rules.
+    pub net: HostNetwork,
 }
 
 pub struct ChVm {
@@ -161,6 +166,7 @@ pub struct ChVm {
     dir: PathBuf,
     child: Child,
     jail: JailSpec,
+    link: VmLink,
     agent: Option<UnixStream>,
     started: Instant,
 }
@@ -201,6 +207,9 @@ impl Hypervisor for CloudHypervisor {
         fs::create_dir_all(&dir)?;
         let (uid, gid) = slot_ids(self.base_uid, slot % 10_000);
         std::os::unix::fs::chown(&dir, Some(uid), Some(gid))?;
+        // The tap must exist, owned by the VM's user, before the restored
+        // VM opens it; egress stays denied until a job's policy is set.
+        let link = self.net.setup(slot, uid, gid)?;
         let jail = JailSpec {
             job_id: id.clone(),
             uid,
@@ -210,8 +219,12 @@ impl Hypervisor for CloudHypervisor {
             // VM RAM plus 512 MiB for the VMM.
             memory_max_bytes: (u64::from(memory_gb) << 30) + (512 << 20),
             bind: Some((dir.clone(), PathBuf::from(IN_JAIL_DIR))),
+            netns: Some(link.netns_path()),
         };
-        jail.create_cgroup()?;
+        if let Err(e) = jail.create_cgroup() {
+            let _ = self.net.teardown(&link);
+            return Err(e);
+        }
         let mut cmd = Command::new(&self.binary);
         cmd.arg("--api-socket")
             .arg(format!("path={IN_JAIL_DIR}/api.sock"))
@@ -220,14 +233,24 @@ impl Hypervisor for CloudHypervisor {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        jail.apply(&mut cmd)?;
-        let child = cmd.spawn().context("spawn cloud-hypervisor")?;
+        let child = match jail
+            .apply(&mut cmd)
+            .and_then(|()| cmd.spawn().context("spawn cloud-hypervisor"))
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = jail.remove_cgroup();
+                let _ = self.net.teardown(&link);
+                return Err(e);
+            }
+        };
         // Restored VMs stay paused until resume.
         let vm = ChVm {
             id,
             dir,
             child,
             jail,
+            link,
             agent: None,
             started: Instant::now(),
         };
@@ -242,6 +265,10 @@ impl Hypervisor for CloudHypervisor {
             weight.clamp(1, 10_000).to_string(),
         )?;
         Ok(())
+    }
+
+    fn set_egress(&self, vm: &mut ChVm, policy: &EgressPolicy) -> Result<()> {
+        self.net.apply(&vm.link, policy)
     }
 
     fn resume(&self, vm: &mut ChVm) -> Result<()> {
@@ -316,9 +343,10 @@ impl Hypervisor for CloudHypervisor {
         let _ = self.ch_remote(&vm, &["shutdown-vmm"]);
         let _ = vm.child.kill();
         let _ = vm.child.wait();
+        let net = self.net.teardown(&vm.link);
         vm.jail.remove_cgroup()?;
         fs::remove_dir_all(&vm.dir).ok();
-        Ok(())
+        net
     }
 }
 
@@ -431,6 +459,7 @@ pub mod fake {
         pub disks: Vec<(String, String)>,
         pub payload: Option<GuestPayload>,
         pub resumed: bool,
+        pub egress: Option<EgressPolicy>,
     }
 
     #[derive(Default)]
@@ -446,6 +475,8 @@ pub mod fake {
         /// When set, the guest ignores stop requests.
         pub ignore_stop: bool,
         pub guest: Arc<FakeGuest>,
+        /// Egress policies set, with whether the VM was already resumed.
+        pub egress: Mutex<Vec<(EgressPolicy, bool)>>,
     }
 
     impl Hypervisor for FakeHypervisor {
@@ -458,9 +489,15 @@ pub mod fake {
                 disks: vec![],
                 payload: None,
                 resumed: false,
+                egress: None,
             })
         }
         fn set_cpu_weight(&self, _vm: &mut FakeVm, _w: u32) -> Result<()> {
+            Ok(())
+        }
+        fn set_egress(&self, vm: &mut FakeVm, p: &EgressPolicy) -> Result<()> {
+            vm.egress = Some(p.clone());
+            self.egress.lock().unwrap().push((p.clone(), vm.resumed));
             Ok(())
         }
         fn resume(&self, vm: &mut FakeVm) -> Result<()> {
