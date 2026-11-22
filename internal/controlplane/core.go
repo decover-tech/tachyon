@@ -18,6 +18,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/scheduler"
 	"github.com/decover-tech/tachyon/internal/telemetry"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Images pins an image name (ubuntu-24.04) to its live version.
@@ -105,6 +106,10 @@ func (c *Core) maxDeferral() time.Duration {
 	return DefaultMaxDeferral
 }
 
+// preForkTTL is how long a host holds a pre-forked job disk waiting for the
+// commit's first job before destroying it.
+const preForkTTL = 10 * time.Minute
+
 var _ jobapi.Core = (*Core)(nil)
 
 func (c *Core) now() time.Time {
@@ -155,6 +160,8 @@ func (c *Core) Hint(ctx context.Context, h jobapi.Hint) error {
 		PreForkId:          h.Repo + "@" + h.Commit,
 		Repo:               repo,
 		PrebuildSnapshotId: ref.GetId(),
+		Commit:             h.Commit,
+		ExpiresAt:          timestamppb.New(c.now().Add(preForkTTL)),
 	}}})
 	return nil
 }

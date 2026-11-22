@@ -169,12 +169,17 @@ message PrebuildBuild {
   repeated string egress_allowlist = 5;
 }
 
-// A job for this repo is likely coming; fork its disk now.
+// A job for this repo is likely coming; fork its disk now. hostd holds the
+// fork until expires_at (or a hostd default when unset) and hands it to the
+// first AssignJob with the same repo, commit and prebuild_snapshot_id.
+// Unused forks are destroyed once they expire.
 message PreFork {
   string pre_fork_id = 1;
   string repo = 2;
   string prebuild_snapshot_id = 3;
   google.protobuf.Timestamp expires_at = 4;
+  // Commit the hint was for; matched against AssignJob.commit.
+  string commit = 5;
 }
 
 message CancelJob {
