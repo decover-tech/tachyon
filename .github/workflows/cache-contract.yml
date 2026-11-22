@@ -1,0 +1,149 @@
+# Daily contract tests: the newest actions/cache release and the newest
+# @actions/cache toolkit against Tachyon's cache service. The protocol is
+# GitHub-internal and was rewritten in 2025, so a client release can break
+# us without notice. See internal/cache/contract.
+#
+# A scheduled or manual failure pages the cache team: it opens (or comments
+# on) a "Cache contract tests failing" issue mentioning the
+# CACHE_CONTRACT_OWNERS repository variable (e.g. @decover-tech/cache), and
+# sends a PagerDuty event when the CACHE_CONTRACT_PAGERDUTY_KEY secret (an
+# Events API v2 routing key) is set. The next green run closes the issue and
+# resolves the incident.
+name: cache-contract
+
+on:
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - internal/cache/**
+      - cmd/tachyon-cache/**
+      - .github/workflows/cache-contract.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      ran: ${{ steps.service.outputs.ran }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Is the cache service built?
+        id: service
+        run: |
+          if grep -q '^func NewServer' internal/cache/*.go; then
+            echo "ran=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::The cache service (internal/cache.NewServer, issue #27) is not on this branch yet; skipping the contract run."
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-go@v5
+        if: steps.service.outputs.ran == 'true'
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        if: steps.service.outputs.ran == 'true'
+        with:
+          node-version: 24
+
+      - name: Fetch the newest actions/cache release
+        if: steps.service.outputs.ran == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view --repo actions/cache --json tagName --jq .tagName)
+          git clone --quiet --depth 1 --branch "$tag" https://github.com/actions/cache "$RUNNER_TEMP/actions-cache"
+          echo "TACHYON_CONTRACT_ACTIONS_CACHE=$RUNNER_TEMP/actions-cache" >> "$GITHUB_ENV"
+          echo "TACHYON_CONTRACT_ACTIONS_CACHE_REF=$tag" >> "$GITHUB_ENV"
+
+      - name: Install the newest @actions/cache
+        if: steps.service.outputs.ran == 'true'
+        run: |
+          mkdir "$RUNNER_TEMP/toolkit"
+          cd "$RUNNER_TEMP/toolkit"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund @actions/cache@latest
+          echo "TACHYON_CONTRACT_TOOLKIT=$RUNNER_TEMP/toolkit" >> "$GITHUB_ENV"
+
+      - name: Contract tests
+        if: steps.service.outputs.ran == 'true'
+        run: go test -tags contract -count=1 -run '^TestLive$' -v ./internal/cache/contract
+
+  # Page on a failed scheduled or manual run. Pull requests only fail checks.
+  page:
+    needs: contract
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      OWNERS: ${{ vars.CACHE_CONTRACT_OWNERS }}
+      PD_KEY: ${{ secrets.CACHE_CONTRACT_PAGERDUTY_KEY }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the tracking issue
+        run: |
+          title="Cache contract tests failing"
+          body="The daily cache contract run failed: $RUN_URL
+
+          The newest actions/cache or @actions/cache no longer works against Tachyon's cache service, or the service regressed. See the run's summary for the failing checks.
+
+          ${OWNERS:-(set the CACHE_CONTRACT_OWNERS repository variable to mention the owning team)}"
+          n=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+                --jq "map(select(.title == \"$title\"))[0].number // empty")
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "Still failing: $RUN_URL ${OWNERS}"
+          else
+            gh issue create --title "$title" --label area:cache --body "$body"
+          fi
+      - name: Page through PagerDuty
+        if: env.PD_KEY != ''
+        run: |
+          jq -n --arg key "$PD_KEY" --arg url "$RUN_URL" '{
+            routing_key: $key, event_action: "trigger", dedup_key: "tachyon-cache-contract",
+            payload: {summary: "Tachyon cache contract tests failing", source: "github-actions",
+                      severity: "error", custom_details: {run: $url}},
+            links: [{href: $url, text: "Failed run"}]}' |
+          curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' \
+            --data @- https://events.pagerduty.com/v2/enqueue
+
+  # A green scheduled or manual run closes the issue and resolves the page.
+  recover:
+    needs: contract
+    if: success() && needs.contract.outputs.ran == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PD_KEY: ${{ secrets.CACHE_CONTRACT_PAGERDUTY_KEY }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Close the tracking issue
+        run: |
+          title="Cache contract tests failing"
+          gh issue list --state open --search "in:title \"$title\"" --json number,title \
+            --jq "map(select(.title == \"$title\"))[].number" |
+          while read -r n; do
+            gh issue close "$n" --comment "Passing again: $RUN_URL"
+          done
+      - name: Resolve the PagerDuty incident
+        if: env.PD_KEY != ''
+        run: |
+          jq -n --arg key "$PD_KEY" '{routing_key: $key, event_action: "resolve", dedup_key: "tachyon-cache-contract"}' |
+          curl --fail --silent --show-error -X POST -H 'Content-Type: application/json' \
+            --data @- https://events.pagerduty.com/v2/enqueue

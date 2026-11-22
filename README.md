@@ -56,6 +56,19 @@ make build    # bin/tachyon, bin/tachyon-controlplane, hostd debug build
 
 hostd compiles on macOS for tests, but only runs on Linux with KVM, ZFS and Cloud Hypervisor.
 
+### Cache contract tests
+
+`.github/workflows/cache-contract.yml` runs daily: it drives the newest `actions/cache` release and the newest `@actions/cache` package against the cache service (`internal/cache/contract`) and pages the cache team on failure. To run it locally (needs Node 24):
+
+```sh
+git clone --depth 1 --branch <tag> https://github.com/actions/cache /tmp/actions-cache
+(mkdir -p /tmp/toolkit && cd /tmp/toolkit && npm init -y && npm install @actions/cache@latest)
+TACHYON_CONTRACT_ACTIONS_CACHE=/tmp/actions-cache TACHYON_CONTRACT_TOOLKIT=/tmp/toolkit \
+  go test -tags contract -run '^TestLive$' -v ./internal/cache/contract
+```
+
+Paging uses the `CACHE_CONTRACT_OWNERS` repository variable (the team to mention on the tracking issue) and the optional `CACHE_CONTRACT_PAGERDUTY_KEY` secret (a PagerDuty Events v2 routing key).
+
 ### Running the control plane
 
 ```sh
