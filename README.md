@@ -130,6 +130,7 @@ Observability is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `h
 | `TACHYON_BASE_SNAPSHOTS` | yes | dir with one Cloud Hypervisor snapshot per VM size: `<dir>/<vcpu>/` |
 | `TACHYON_WARM` | no | `2:2,4:2,8:1` (vcpu:paused VMs) |
 | `TACHYON_FAILURE_DOMAIN`, `TACHYON_ARCH` | no | `default`, `x86_64` |
+| `TACHYON_HOST_GROUP` | no | empty; fleet group such as `canary` or `stable`, reported in Hello and shown by the operator API; see [docs/fleet-operations.md](docs/fleet-operations.md) |
 | `TACHYON_CH_BINARY`, `TACHYON_CH_REMOTE` | no | `/usr/local/bin/cloud-hypervisor`, `/usr/local/bin/ch-remote` |
 | `TACHYON_RUN_DIR`, `TACHYON_CGROUP`, `TACHYON_BASE_UID` | no | `/run/tachyon/vms`, `/sys/fs/cgroup/tachyon`, `100000` |
 | `TACHYON_IMAGES` | no | base image store, `<dir>/<name>@<version>/`; prepared versions are reported in heartbeats |
@@ -144,6 +145,8 @@ Observability is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `h
 `tachyon-hostd prepare-image ubuntu-24.04@2026-11-16` verifies an image in `TACHYON_IMAGES` against the keys in `TACHYON_IMAGE_TRUST` (PEM), then boots it once per VM size and leaves paused snapshots in `<image>/snapshots/<vcpu>/` (point `TACHYON_BASE_SNAPSHOTS` there). It boots `TACHYON_GUEST_KERNEL` when the image ships no kernel.
 
 The control plane runs signed images with a canary rollout instead of static `-image` pins when given `-image-trust keys.pem -image-manifests a/manifest.signed.json -canary-hosts h1,h2`.
+
+Hosts are provisioned with `deploy/fleet/tachyon-host-bootstrap.sh`, and drained and upgraded through the control plane's operator API (`-admin-addr`, `-admin-token-file`; off by default). The runbook, and what has not been tried on real hardware, are in [docs/fleet-operations.md](docs/fleet-operations.md).
 
 Each VM gets its own network namespace and tap (`hostd/src/network.rs`); hostd needs `ip`, `nft` and `tc` on the host, and base snapshots must use a virtio-net device on `tap0` with guest address `172.16.0.2/30`, gateway `172.16.0.1`.
 

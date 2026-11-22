@@ -115,13 +115,18 @@ type Core struct {
 	// patterns; alerts that call for it cancel the job.
 	Anomalies *abuse.Monitor
 
-	mu       sync.Mutex
-	pbJobs   map[string]string // prebuild build job ID -> repo (prebuilds.go)
-	hosts    map[string]*hostConn
-	hints    map[string]hintEntry // repo@commit -> changed files
-	deferred []jobapi.Submission
-	records  map[string]*telemetry.Record
-	repl     replication // snapshot pulls in flight (replication.go)
+	mu     sync.Mutex
+	pbJobs map[string]string // prebuild build job ID -> repo (prebuilds.go)
+	hosts  map[string]*hostConn
+	// drainWanted is the operator's drain intent by host ID (admin.go). It
+	// lives in memory: after a control plane restart a host that was
+	// drained keeps reporting draining itself until it is undrained.
+	drainWanted map[string]bool
+	meta        map[string]hostMeta  // hostd version and group at last Hello
+	hints       map[string]hintEntry // repo@commit -> changed files
+	deferred    []jobapi.Submission
+	records     map[string]*telemetry.Record
+	repl        replication // snapshot pulls in flight (replication.go)
 	// inflight holds the IDs of jobs a Submit call is working on, so a
 	// duplicate submission of the same ID can't race it.
 	inflight map[string]bool
@@ -168,6 +173,8 @@ func (c *Core) log() *slog.Logger {
 func (c *Core) init() {
 	if c.hosts == nil {
 		c.hosts = map[string]*hostConn{}
+		c.drainWanted = map[string]bool{}
+		c.meta = map[string]hostMeta{}
 		c.hints = map[string]hintEntry{}
 		c.records = map[string]*telemetry.Record{}
 		c.inflight = map[string]bool{}

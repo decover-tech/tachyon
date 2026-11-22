@@ -1,0 +1,12 @@
+#!ipxe
+# Entry script: the DHCP server hands this URL to iPXE (see dnsmasq.conf.example).
+# It chains to the per-host script rendered by render.sh, keyed by MAC address.
+# NOT TESTED on hardware.
+dhcp
+chain ${NETBOOT_BASE_URL}/hosts/${net0/mac:hexhyp}/boot.ipxe || goto failed
+exit
+
+:failed
+echo No boot script for ${net0/mac:hexhyp}; render one with netboot/render.sh
+sleep 30
+exit 1

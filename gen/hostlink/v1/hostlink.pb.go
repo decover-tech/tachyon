@@ -405,7 +405,10 @@ type Hello struct {
 	RunningJobIds []string `protobuf:"bytes,8,rep,name=running_job_ids,json=runningJobIds,proto3" json:"running_job_ids,omitempty"`
 	// Where peers reach this host's PeerSnapshotService (peer.proto); empty
 	// means the host serves no snapshot pulls.
-	PeerAddress   string `protobuf:"bytes,9,opt,name=peer_address,json=peerAddress,proto3" json:"peer_address,omitempty"`
+	PeerAddress string `protobuf:"bytes,9,opt,name=peer_address,json=peerAddress,proto3" json:"peer_address,omitempty"`
+	// Operator-assigned fleet group, e.g. "canary" or "stable", used to roll
+	// hostd releases through a subset of hosts first. Empty = ungrouped.
+	HostGroup     string `protobuf:"bytes,10,opt,name=host_group,json=hostGroup,proto3" json:"host_group,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -499,6 +502,13 @@ func (x *Hello) GetRunningJobIds() []string {
 func (x *Hello) GetPeerAddress() string {
 	if x != nil {
 		return x.PeerAddress
+	}
+	return ""
+}
+
+func (x *Hello) GetHostGroup() string {
+	if x != nil {
+		return x.HostGroup
 	}
 	return ""
 }
@@ -1863,7 +1873,7 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"job_result\x18\x04 \x01(\v2\x1e.tachyon.hostlink.v1.JobResultH\x00R\tjobResult\x12<\n" +
 	"\tjob_usage\x18\x06 \x01(\v2\x1d.tachyon.hostlink.v1.JobUsageH\x00R\bjobUsage\x12\x10\n" +
 	"\x03seq\x18\x05 \x01(\x04R\x03seqB\x05\n" +
-	"\x03msg\"\x94\x02\n" +
+	"\x03msg\"\xb3\x02\n" +
 	"\x05Hello\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12%\n" +
@@ -1873,7 +1883,10 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"\tmemory_gb\x18\x06 \x01(\rR\bmemoryGb\x12#\n" +
 	"\rhostd_version\x18\a \x01(\tR\fhostdVersion\x12&\n" +
 	"\x0frunning_job_ids\x18\b \x03(\tR\rrunningJobIds\x12!\n" +
-	"\fpeer_address\x18\t \x01(\tR\vpeerAddress\"\xb3\x03\n" +
+	"\fpeer_address\x18\t \x01(\tR\vpeerAddress\x12\x1d\n" +
+	"\n" +
+	"host_group\x18\n" +
+	" \x01(\tR\thostGroup\"\xb3\x03\n" +
 	"\tHeartbeat\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12Z\n" +
 	"\x10warm_vms_by_vcpu\x18\x02 \x03(\v21.tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntryR\rwarmVmsByVcpu\x12>\n" +

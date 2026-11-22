@@ -1,0 +1,9 @@
+#!ipxe
+# Per-host script for ${HOST_ID}: boots the Ubuntu 24.04 live-server installer
+# with autoinstall, taking its user-data from the same directory.
+# Kernel, initrd and ISO come from the official Ubuntu live-server release;
+# put them under ${NETBOOT_BASE_URL}/ and pin their checksums yourself.
+# NOT TESTED on hardware.
+kernel ${NETBOOT_BASE_URL}/vmlinuz initrd=initrd ip=dhcp url=${NETBOOT_BASE_URL}/ubuntu-24.04-live-server-amd64.iso autoinstall ds=nocloud-net;s=${NETBOOT_BASE_URL}/hosts/${HOST_MAC}/
+initrd ${NETBOOT_BASE_URL}/initrd
+boot

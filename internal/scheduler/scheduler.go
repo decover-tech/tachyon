@@ -347,3 +347,42 @@ func (s *Scheduler) Load(hostID string) float64 {
 	}
 	return 0
 }
+
+// HostStatus is a point-in-time view of one host and what is placed on it.
+type HostStatus struct {
+	Host
+	// Jobs is the number of jobs holding a reservation on the host. A
+	// draining host with zero jobs is empty and safe to take down.
+	Jobs        int
+	CPUReserved float64
+	MemReserved float64
+}
+
+// Hosts returns every known host with its reservations, sorted by ID.
+func (s *Scheduler) Hosts() []HostStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	jobs := map[string]int{}
+	for _, a := range s.allocs {
+		jobs[a.hostID]++
+	}
+	out := make([]HostStatus, 0, len(s.hosts))
+	for id, h := range s.hosts {
+		out = append(out, HostStatus{Host: h.Host, Jobs: jobs[id], CPUReserved: h.cpuUsed, MemReserved: h.memUsed})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// SetDraining marks a known host draining or not and reports whether the
+// host exists. A draining host takes no new jobs; running jobs finish.
+func (s *Scheduler) SetDraining(id string, draining bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.hosts[id]
+	if h == nil {
+		return false
+	}
+	h.Draining = draining
+	return true
+}

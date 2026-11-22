@@ -47,6 +47,9 @@ message Hello {
   // Where peers reach this host's PeerSnapshotService (peer.proto); empty
   // means the host serves no snapshot pulls.
   string peer_address = 9;
+  // Operator-assigned fleet group, e.g. "canary" or "stable", used to roll
+  // hostd releases through a subset of hosts first. Empty = ungrouped.
+  string host_group = 10;
 }
 
 message Heartbeat {

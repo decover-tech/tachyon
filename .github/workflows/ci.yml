@@ -42,6 +42,15 @@ jobs:
           buf generate
           git diff --exit-code gen/
 
+  # Lints and tests the host provisioning scripts. The tests render files and
+  # check commands in a dry run; they do not provision a host.
+  fleet:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck deploy/fleet/tachyon-host-bootstrap.sh deploy/fleet/netboot/render.sh deploy/fleet/test/test_bootstrap.sh
+      - run: bash deploy/fleet/test/test_bootstrap.sh
+
   hostd:
     runs-on: ubuntu-24.04
     defaults:

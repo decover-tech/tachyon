@@ -1,0 +1,20 @@
+#cloud-config
+# For providers that boot a stock Ubuntu 24.04 image and accept cloud-init
+# user-data (or let you run a script on first boot). Fill in the <...> values.
+# NOT TESTED on any provider. The bootstrap script's own behaviour is covered
+# by deploy/fleet/test/test_bootstrap.sh in a dry run only.
+hostname: <host-id>
+disable_root: true
+write_files:
+  - path: /etc/tachyon/fleet.conf
+    permissions: "0600"
+    owner: root:root
+    content: |
+      # copy deploy/fleet/fleet.conf.example and fill it in for this host
+runcmd:
+  - curl -fsSL --retry 3 -o /usr/local/sbin/tachyon-host-bootstrap.sh "<https url of the script>"
+  - echo "<sha256 of the script>  /usr/local/sbin/tachyon-host-bootstrap.sh" | sha256sum -c -
+  - chmod 0755 /usr/local/sbin/tachyon-host-bootstrap.sh
+  # Exits 3 (and does not start hostd) until the certificate and base
+  # snapshots are in place; that is expected on first boot.
+  - /usr/local/sbin/tachyon-host-bootstrap.sh -c /etc/tachyon/fleet.conf all || true

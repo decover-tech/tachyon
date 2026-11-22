@@ -320,6 +320,7 @@ mod tests {
             vcpu: 16,
             memory_gb: 64,
             peer_address: String::new(),
+            host_group: String::new(),
         };
         assert!(init_otlp(&info).unwrap().is_none());
         let r = resource(&info);
