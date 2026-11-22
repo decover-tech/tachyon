@@ -376,6 +376,9 @@ type Hello struct {
 	HostdVersion  string                 `protobuf:"bytes,7,opt,name=hostd_version,json=hostdVersion,proto3" json:"hostd_version,omitempty"`
 	// Jobs still running from before a reconnect.
 	RunningJobIds []string `protobuf:"bytes,8,rep,name=running_job_ids,json=runningJobIds,proto3" json:"running_job_ids,omitempty"`
+	// Where peers reach this host's PeerSnapshotService (peer.proto); empty
+	// means the host serves no snapshot pulls.
+	PeerAddress   string `protobuf:"bytes,9,opt,name=peer_address,json=peerAddress,proto3" json:"peer_address,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -464,6 +467,13 @@ func (x *Hello) GetRunningJobIds() []string {
 		return x.RunningJobIds
 	}
 	return nil
+}
+
+func (x *Hello) GetPeerAddress() string {
+	if x != nil {
+		return x.PeerAddress
+	}
+	return ""
 }
 
 type Heartbeat struct {
@@ -808,6 +818,7 @@ type LinkResponse struct {
 	//	*LinkResponse_Cancel
 	//	*LinkResponse_Drain
 	//	*LinkResponse_PullSnapshot
+	//	*LinkResponse_ServeSnapshot
 	Msg           isLinkResponse_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -895,6 +906,15 @@ func (x *LinkResponse) GetPullSnapshot() *PullSnapshot {
 	return nil
 }
 
+func (x *LinkResponse) GetServeSnapshot() *ServeSnapshot {
+	if x != nil {
+		if x, ok := x.Msg.(*LinkResponse_ServeSnapshot); ok {
+			return x.ServeSnapshot
+		}
+	}
+	return nil
+}
+
 type isLinkResponse_Msg interface {
 	isLinkResponse_Msg()
 }
@@ -919,6 +939,10 @@ type LinkResponse_PullSnapshot struct {
 	PullSnapshot *PullSnapshot `protobuf:"bytes,5,opt,name=pull_snapshot,json=pullSnapshot,proto3,oneof"`
 }
 
+type LinkResponse_ServeSnapshot struct {
+	ServeSnapshot *ServeSnapshot `protobuf:"bytes,6,opt,name=serve_snapshot,json=serveSnapshot,proto3,oneof"`
+}
+
 func (*LinkResponse_Assign) isLinkResponse_Msg() {}
 
 func (*LinkResponse_PreFork) isLinkResponse_Msg() {}
@@ -928,6 +952,8 @@ func (*LinkResponse_Cancel) isLinkResponse_Msg() {}
 func (*LinkResponse_Drain) isLinkResponse_Msg() {}
 
 func (*LinkResponse_PullSnapshot) isLinkResponse_Msg() {}
+
+func (*LinkResponse_ServeSnapshot) isLinkResponse_Msg() {}
 
 type Volume struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1452,10 +1478,13 @@ func (x *Drain) GetDrain() bool {
 }
 
 type PullSnapshot struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Snapshot      *SnapshotRef           `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
-	FromHostId    string                 `protobuf:"bytes,2,opt,name=from_host_id,json=fromHostId,proto3" json:"from_host_id,omitempty"`
-	FromAddress   string                 `protobuf:"bytes,3,opt,name=from_address,json=fromAddress,proto3" json:"from_address,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Snapshot    *SnapshotRef           `protobuf:"bytes,1,opt,name=snapshot,proto3" json:"snapshot,omitempty"`
+	FromHostId  string                 `protobuf:"bytes,2,opt,name=from_host_id,json=fromHostId,proto3" json:"from_host_id,omitempty"`
+	FromAddress string                 `protobuf:"bytes,3,opt,name=from_address,json=fromAddress,proto3" json:"from_address,omitempty"`
+	// Single-use pull grant; the peer was sent the same token in a
+	// ServeSnapshot and refuses the pull without it.
+	Token         string `protobuf:"bytes,4,opt,name=token,proto3" json:"token,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1511,6 +1540,83 @@ func (x *PullSnapshot) GetFromAddress() string {
 	return ""
 }
 
+func (x *PullSnapshot) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+// Lets one peer pull a snapshot from this host: the authorization half of a
+// PullSnapshot. Grants are single-use and expire.
+type ServeSnapshot struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Token         string                 `protobuf:"bytes,1,opt,name=token,proto3" json:"token,omitempty"`
+	SnapshotId    string                 `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	ToHostId      string                 `protobuf:"bytes,3,opt,name=to_host_id,json=toHostId,proto3" json:"to_host_id,omitempty"`
+	ExpiresAt     *timestamppb.Timestamp `protobuf:"bytes,4,opt,name=expires_at,json=expiresAt,proto3" json:"expires_at,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ServeSnapshot) Reset() {
+	*x = ServeSnapshot{}
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ServeSnapshot) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ServeSnapshot) ProtoMessage() {}
+
+func (x *ServeSnapshot) ProtoReflect() protoreflect.Message {
+	mi := &file_tachyon_hostlink_v1_hostlink_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ServeSnapshot.ProtoReflect.Descriptor instead.
+func (*ServeSnapshot) Descriptor() ([]byte, []int) {
+	return file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *ServeSnapshot) GetToken() string {
+	if x != nil {
+		return x.Token
+	}
+	return ""
+}
+
+func (x *ServeSnapshot) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
+}
+
+func (x *ServeSnapshot) GetToHostId() string {
+	if x != nil {
+		return x.ToHostId
+	}
+	return ""
+}
+
+func (x *ServeSnapshot) GetExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.ExpiresAt
+	}
+	return nil
+}
+
 var File_tachyon_hostlink_v1_hostlink_proto protoreflect.FileDescriptor
 
 const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
@@ -1522,7 +1628,7 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"\tjob_event\x18\x03 \x01(\v2\x1d.tachyon.hostlink.v1.JobEventH\x00R\bjobEvent\x12?\n" +
 	"\n" +
 	"job_result\x18\x04 \x01(\v2\x1e.tachyon.hostlink.v1.JobResultH\x00R\tjobResultB\x05\n" +
-	"\x03msg\"\xf1\x01\n" +
+	"\x03msg\"\x94\x02\n" +
 	"\x05Hello\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
 	"\x06region\x18\x02 \x01(\tR\x06region\x12%\n" +
@@ -1531,7 +1637,8 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"\x04vcpu\x18\x05 \x01(\rR\x04vcpu\x12\x1b\n" +
 	"\tmemory_gb\x18\x06 \x01(\rR\bmemoryGb\x12#\n" +
 	"\rhostd_version\x18\a \x01(\tR\fhostdVersion\x12&\n" +
-	"\x0frunning_job_ids\x18\b \x03(\tR\rrunningJobIds\"\xb3\x03\n" +
+	"\x0frunning_job_ids\x18\b \x03(\tR\rrunningJobIds\x12!\n" +
+	"\fpeer_address\x18\t \x01(\tR\vpeerAddress\"\xb3\x03\n" +
 	"\tHeartbeat\x12*\n" +
 	"\x02at\x18\x01 \x01(\v2\x1a.google.protobuf.TimestampR\x02at\x12Z\n" +
 	"\x10warm_vms_by_vcpu\x18\x02 \x03(\v21.tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntryR\rwarmVmsByVcpu\x12>\n" +
@@ -1573,13 +1680,14 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"\x11OUTCOME_SUCCEEDED\x10\x01\x12\x12\n" +
 	"\x0eOUTCOME_FAILED\x10\x02\x12\x17\n" +
 	"\x13OUTCOME_INFRA_ERROR\x10\x03\x12\x15\n" +
-	"\x11OUTCOME_CANCELLED\x10\x04\"\xc2\x02\n" +
+	"\x11OUTCOME_CANCELLED\x10\x04\"\x8f\x03\n" +
 	"\fLinkResponse\x128\n" +
 	"\x06assign\x18\x01 \x01(\v2\x1e.tachyon.hostlink.v1.AssignJobH\x00R\x06assign\x129\n" +
 	"\bpre_fork\x18\x02 \x01(\v2\x1c.tachyon.hostlink.v1.PreForkH\x00R\apreFork\x128\n" +
 	"\x06cancel\x18\x03 \x01(\v2\x1e.tachyon.hostlink.v1.CancelJobH\x00R\x06cancel\x122\n" +
 	"\x05drain\x18\x04 \x01(\v2\x1a.tachyon.hostlink.v1.DrainH\x00R\x05drain\x12H\n" +
-	"\rpull_snapshot\x18\x05 \x01(\v2!.tachyon.hostlink.v1.PullSnapshotH\x00R\fpullSnapshotB\x05\n" +
+	"\rpull_snapshot\x18\x05 \x01(\v2!.tachyon.hostlink.v1.PullSnapshotH\x00R\fpullSnapshot\x12K\n" +
+	"\x0eserve_snapshot\x18\x06 \x01(\v2\".tachyon.hostlink.v1.ServeSnapshotH\x00R\rserveSnapshotB\x05\n" +
 	"\x03msg\"^\n" +
 	"\x06Volume\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
@@ -1632,12 +1740,21 @@ const file_tachyon_hostlink_v1_hostlink_proto_rawDesc = "" +
 	"\tCancelJob\x12\x15\n" +
 	"\x06job_id\x18\x01 \x01(\tR\x05jobId\"\x1d\n" +
 	"\x05Drain\x12\x14\n" +
-	"\x05drain\x18\x01 \x01(\bR\x05drain\"\x91\x01\n" +
+	"\x05drain\x18\x01 \x01(\bR\x05drain\"\xa7\x01\n" +
 	"\fPullSnapshot\x12<\n" +
 	"\bsnapshot\x18\x01 \x01(\v2 .tachyon.hostlink.v1.SnapshotRefR\bsnapshot\x12 \n" +
 	"\ffrom_host_id\x18\x02 \x01(\tR\n" +
 	"fromHostId\x12!\n" +
-	"\ffrom_address\x18\x03 \x01(\tR\vfromAddress*\xad\x01\n" +
+	"\ffrom_address\x18\x03 \x01(\tR\vfromAddress\x12\x14\n" +
+	"\x05token\x18\x04 \x01(\tR\x05token\"\x9f\x01\n" +
+	"\rServeSnapshot\x12\x14\n" +
+	"\x05token\x18\x01 \x01(\tR\x05token\x12\x1f\n" +
+	"\vsnapshot_id\x18\x02 \x01(\tR\n" +
+	"snapshotId\x12\x1c\n" +
+	"\n" +
+	"to_host_id\x18\x03 \x01(\tR\btoHostId\x129\n" +
+	"\n" +
+	"expires_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\texpiresAt*\xad\x01\n" +
 	"\x05Phase\x12\x15\n" +
 	"\x11PHASE_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13PHASE_HOST_ASSIGNED\x10\x01\x12\x14\n" +
@@ -1667,7 +1784,7 @@ func file_tachyon_hostlink_v1_hostlink_proto_rawDescGZIP() []byte {
 }
 
 var file_tachyon_hostlink_v1_hostlink_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_tachyon_hostlink_v1_hostlink_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_tachyon_hostlink_v1_hostlink_proto_msgTypes = make([]protoimpl.MessageInfo, 19)
 var file_tachyon_hostlink_v1_hostlink_proto_goTypes = []any{
 	(Phase)(0),                    // 0: tachyon.hostlink.v1.Phase
 	(Trust)(0),                    // 1: tachyon.hostlink.v1.Trust
@@ -1688,22 +1805,23 @@ var file_tachyon_hostlink_v1_hostlink_proto_goTypes = []any{
 	(*CancelJob)(nil),             // 16: tachyon.hostlink.v1.CancelJob
 	(*Drain)(nil),                 // 17: tachyon.hostlink.v1.Drain
 	(*PullSnapshot)(nil),          // 18: tachyon.hostlink.v1.PullSnapshot
-	nil,                           // 19: tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntry
-	nil,                           // 20: tachyon.hostlink.v1.GuestConfig.EnvEntry
-	nil,                           // 21: tachyon.hostlink.v1.GuestConfig.FilesEntry
-	(*timestamppb.Timestamp)(nil), // 22: google.protobuf.Timestamp
+	(*ServeSnapshot)(nil),         // 19: tachyon.hostlink.v1.ServeSnapshot
+	nil,                           // 20: tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntry
+	nil,                           // 21: tachyon.hostlink.v1.GuestConfig.EnvEntry
+	nil,                           // 22: tachyon.hostlink.v1.GuestConfig.FilesEntry
+	(*timestamppb.Timestamp)(nil), // 23: google.protobuf.Timestamp
 }
 var file_tachyon_hostlink_v1_hostlink_proto_depIdxs = []int32{
 	5,  // 0: tachyon.hostlink.v1.LinkRequest.hello:type_name -> tachyon.hostlink.v1.Hello
 	6,  // 1: tachyon.hostlink.v1.LinkRequest.heartbeat:type_name -> tachyon.hostlink.v1.Heartbeat
 	8,  // 2: tachyon.hostlink.v1.LinkRequest.job_event:type_name -> tachyon.hostlink.v1.JobEvent
 	9,  // 3: tachyon.hostlink.v1.LinkRequest.job_result:type_name -> tachyon.hostlink.v1.JobResult
-	22, // 4: tachyon.hostlink.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
-	19, // 5: tachyon.hostlink.v1.Heartbeat.warm_vms_by_vcpu:type_name -> tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntry
+	23, // 4: tachyon.hostlink.v1.Heartbeat.at:type_name -> google.protobuf.Timestamp
+	20, // 5: tachyon.hostlink.v1.Heartbeat.warm_vms_by_vcpu:type_name -> tachyon.hostlink.v1.Heartbeat.WarmVmsByVcpuEntry
 	7,  // 6: tachyon.hostlink.v1.Heartbeat.snapshots:type_name -> tachyon.hostlink.v1.SnapshotRef
 	2,  // 7: tachyon.hostlink.v1.SnapshotRef.kind:type_name -> tachyon.hostlink.v1.SnapshotRef.Kind
 	0,  // 8: tachyon.hostlink.v1.JobEvent.phase:type_name -> tachyon.hostlink.v1.Phase
-	22, // 9: tachyon.hostlink.v1.JobEvent.at:type_name -> google.protobuf.Timestamp
+	23, // 9: tachyon.hostlink.v1.JobEvent.at:type_name -> google.protobuf.Timestamp
 	3,  // 10: tachyon.hostlink.v1.JobResult.outcome:type_name -> tachyon.hostlink.v1.JobResult.Outcome
 	7,  // 11: tachyon.hostlink.v1.JobResult.promoted:type_name -> tachyon.hostlink.v1.SnapshotRef
 	7,  // 12: tachyon.hostlink.v1.JobResult.prebuild:type_name -> tachyon.hostlink.v1.SnapshotRef
@@ -1712,21 +1830,23 @@ var file_tachyon_hostlink_v1_hostlink_proto_depIdxs = []int32{
 	16, // 15: tachyon.hostlink.v1.LinkResponse.cancel:type_name -> tachyon.hostlink.v1.CancelJob
 	17, // 16: tachyon.hostlink.v1.LinkResponse.drain:type_name -> tachyon.hostlink.v1.Drain
 	18, // 17: tachyon.hostlink.v1.LinkResponse.pull_snapshot:type_name -> tachyon.hostlink.v1.PullSnapshot
-	11, // 18: tachyon.hostlink.v1.AssignJob.volumes:type_name -> tachyon.hostlink.v1.Volume
-	1,  // 19: tachyon.hostlink.v1.AssignJob.trust:type_name -> tachyon.hostlink.v1.Trust
-	13, // 20: tachyon.hostlink.v1.AssignJob.guest:type_name -> tachyon.hostlink.v1.GuestConfig
-	14, // 21: tachyon.hostlink.v1.AssignJob.prebuild_build:type_name -> tachyon.hostlink.v1.PrebuildBuild
-	20, // 22: tachyon.hostlink.v1.GuestConfig.env:type_name -> tachyon.hostlink.v1.GuestConfig.EnvEntry
-	21, // 23: tachyon.hostlink.v1.GuestConfig.files:type_name -> tachyon.hostlink.v1.GuestConfig.FilesEntry
-	22, // 24: tachyon.hostlink.v1.PreFork.expires_at:type_name -> google.protobuf.Timestamp
-	7,  // 25: tachyon.hostlink.v1.PullSnapshot.snapshot:type_name -> tachyon.hostlink.v1.SnapshotRef
-	4,  // 26: tachyon.hostlink.v1.HostLinkService.Link:input_type -> tachyon.hostlink.v1.LinkRequest
-	10, // 27: tachyon.hostlink.v1.HostLinkService.Link:output_type -> tachyon.hostlink.v1.LinkResponse
-	27, // [27:28] is the sub-list for method output_type
-	26, // [26:27] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	19, // 18: tachyon.hostlink.v1.LinkResponse.serve_snapshot:type_name -> tachyon.hostlink.v1.ServeSnapshot
+	11, // 19: tachyon.hostlink.v1.AssignJob.volumes:type_name -> tachyon.hostlink.v1.Volume
+	1,  // 20: tachyon.hostlink.v1.AssignJob.trust:type_name -> tachyon.hostlink.v1.Trust
+	13, // 21: tachyon.hostlink.v1.AssignJob.guest:type_name -> tachyon.hostlink.v1.GuestConfig
+	14, // 22: tachyon.hostlink.v1.AssignJob.prebuild_build:type_name -> tachyon.hostlink.v1.PrebuildBuild
+	21, // 23: tachyon.hostlink.v1.GuestConfig.env:type_name -> tachyon.hostlink.v1.GuestConfig.EnvEntry
+	22, // 24: tachyon.hostlink.v1.GuestConfig.files:type_name -> tachyon.hostlink.v1.GuestConfig.FilesEntry
+	23, // 25: tachyon.hostlink.v1.PreFork.expires_at:type_name -> google.protobuf.Timestamp
+	7,  // 26: tachyon.hostlink.v1.PullSnapshot.snapshot:type_name -> tachyon.hostlink.v1.SnapshotRef
+	23, // 27: tachyon.hostlink.v1.ServeSnapshot.expires_at:type_name -> google.protobuf.Timestamp
+	4,  // 28: tachyon.hostlink.v1.HostLinkService.Link:input_type -> tachyon.hostlink.v1.LinkRequest
+	10, // 29: tachyon.hostlink.v1.HostLinkService.Link:output_type -> tachyon.hostlink.v1.LinkResponse
+	29, // [29:30] is the sub-list for method output_type
+	28, // [28:29] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_tachyon_hostlink_v1_hostlink_proto_init() }
@@ -1746,6 +1866,7 @@ func file_tachyon_hostlink_v1_hostlink_proto_init() {
 		(*LinkResponse_Cancel)(nil),
 		(*LinkResponse_Drain)(nil),
 		(*LinkResponse_PullSnapshot)(nil),
+		(*LinkResponse_ServeSnapshot)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1753,7 +1874,7 @@ func file_tachyon_hostlink_v1_hostlink_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_tachyon_hostlink_v1_hostlink_proto_rawDesc), len(file_tachyon_hostlink_v1_hostlink_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   18,
+			NumMessages:   19,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

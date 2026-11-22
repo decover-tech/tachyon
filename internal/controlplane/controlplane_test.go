@@ -105,6 +105,15 @@ func newEnv() *env {
 // connect opens a host stream and sends Hello.
 func (e *env) connect(t *testing.T, id, region string, vcpu, mem uint32) *fakeStream {
 	t.Helper()
+	return e.connectHello(t, &hostlinkv1.Hello{
+		HostId: id, Region: region, FailureDomain: id, Arch: "x86_64", Vcpu: vcpu, MemoryGb: mem,
+		PeerAddress: "http://" + id + ":7443",
+	})
+}
+
+// connectHello opens a host stream and sends hello.
+func (e *env) connectHello(t *testing.T, hello *hostlinkv1.Hello) *fakeStream {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &fakeStream{
 		ctx:     ctx,
@@ -115,9 +124,7 @@ func (e *env) connect(t *testing.T, id, region string, vcpu, mem uint32) *fakeSt
 	done := make(chan error, 1)
 	go func() { done <- e.link.Link(s) }()
 	<-s.waiting // first Recv
-	s.push(t, &hostlinkv1.LinkRequest{Msg: &hostlinkv1.LinkRequest_Hello{Hello: &hostlinkv1.Hello{
-		HostId: id, Region: region, FailureDomain: id, Arch: "x86_64", Vcpu: vcpu, MemoryGb: mem,
-	}}})
+	s.push(t, &hostlinkv1.LinkRequest{Msg: &hostlinkv1.LinkRequest_Hello{Hello: hello}})
 	var once sync.Once
 	s.disconnect = func() {
 		once.Do(func() {
@@ -257,7 +264,8 @@ func TestSubmitFallsBackWhenHostLacksPrebuild(t *testing.T) {
 	// h1 is asked to pull the prebuild from its regional peer, then runs the
 	// job from the base image.
 	pull := h1.next(t).GetPullSnapshot()
-	if pull == nil || pull.GetFromHostId() != "h2" || pull.GetSnapshot().GetId() != "h2-snap" {
+	if pull == nil || pull.GetFromHostId() != "h2" || pull.GetSnapshot().GetId() != "h2-snap" ||
+		pull.GetFromAddress() != "http://h2:7443" || pull.GetToken() == "" {
 		t.Fatalf("expected PullSnapshot from h2, got %v", pull)
 	}
 	a := h1.next(t).GetAssign()
@@ -266,6 +274,11 @@ func TestSubmitFallsBackWhenHostLacksPrebuild(t *testing.T) {
 	}
 	if _, ok := a.GetGuest().GetEnv()["TACHYON_WARM_PATHS"]; ok {
 		t.Error("warm paths set for a base-image fork")
+	}
+	// h2 is granted exactly that pull.
+	g := h2.next(t).GetServeSnapshot()
+	if g == nil || g.GetToken() != pull.GetToken() || g.GetToHostId() != "h1" || g.GetSnapshotId() != "h2-snap" {
+		t.Fatalf("grant = %v", g)
 	}
 	h2.none(t)
 }

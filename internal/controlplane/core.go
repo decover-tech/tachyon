@@ -86,6 +86,7 @@ type Core struct {
 	hints    map[string]hintEntry // repo@commit -> changed files
 	deferred []jobapi.Submission
 	records  map[string]*telemetry.Record
+	repl     replication // snapshot pulls in flight (replication.go)
 }
 
 type hintEntry struct {

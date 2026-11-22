@@ -17,9 +17,14 @@ import (
 type hostConn struct {
 	id     string
 	region string
-	out    chan *hostlinkv1.LinkResponse
-	snaps  []*hostlinkv1.SnapshotRef
-	closed chan struct{}
+	// Placement-set attributes and the peer transfer address (replication.go).
+	arch          string
+	failureDomain string
+	peerAddr      string
+	out           chan *hostlinkv1.LinkResponse
+	snaps         []*hostlinkv1.SnapshotRef
+	draining      bool
+	closed        chan struct{}
 }
 
 func (h *hostConn) send(m *hostlinkv1.LinkResponse) {
@@ -50,10 +55,13 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 	// TODO: authenticate the host from its mTLS client certificate and
 	// check it matches hello.host_id.
 	hc := &hostConn{
-		id:     hello.GetHostId(),
-		region: hello.GetRegion(),
-		out:    make(chan *hostlinkv1.LinkResponse, 64),
-		closed: make(chan struct{}),
+		id:            hello.GetHostId(),
+		region:        hello.GetRegion(),
+		arch:          hello.GetArch(),
+		failureDomain: hello.GetFailureDomain(),
+		peerAddr:      hello.GetPeerAddress(),
+		out:           make(chan *hostlinkv1.LinkResponse, 64),
+		closed:        make(chan struct{}),
 	}
 	c.mu.Lock()
 	c.init()
@@ -154,6 +162,7 @@ func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostli
 	}
 	c.mu.Lock()
 	hc.snaps = hb.GetSnapshots()
+	hc.draining = hb.GetDraining()
 	c.mu.Unlock()
 	c.Scheduler.UpsertHost(scheduler.Host{
 		ID:            hc.id,
@@ -212,6 +221,7 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 			CreatedAt: time.Now(),
 			Healthy:   true,
 		})
+		c.replicatePrebuild(hc.id, pb)
 	}
 	c.log().Info("job finished", "job", r.GetJobId(), "host", hc.id, "outcome", r.GetOutcome().String())
 }
@@ -301,8 +311,5 @@ func (c *Core) requestPull(hostID, repo string) {
 	if target == nil || from == nil {
 		return
 	}
-	target.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_PullSnapshot{PullSnapshot: &hostlinkv1.PullSnapshot{
-		Snapshot:   ref,
-		FromHostId: from.id,
-	}}})
+	c.brokerPull(target, from, ref)
 }

@@ -13,6 +13,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::hypervisor::Hypervisor;
 use crate::lifecycle::Agent;
 use crate::pb::{self, host_link_service_client::HostLinkServiceClient};
+use crate::replicate;
 use crate::storage::Storage;
 
 #[derive(Debug, Clone)]
@@ -23,6 +24,16 @@ pub struct HostInfo {
     pub arch: String,
     pub vcpu: u32,
     pub memory_gb: u32,
+    /// Advertised address of this host's peer snapshot service; empty if
+    /// it serves no pulls.
+    pub peer_address: String,
+}
+
+/// Snapshot replication state shared by the link and the peer server.
+pub struct Peer {
+    pub grants: Arc<replicate::Grants>,
+    pub repl: replicate::Replicators,
+    pub opts: replicate::PullOptions,
 }
 
 /// Snapshots this host holds, reported on every heartbeat.
@@ -53,6 +64,8 @@ pub struct Link<H: Hypervisor + 'static, S: Storage + 'static> {
     pub control_plane: String,
     pub inventory: Arc<Inventory>,
     pub draining: Arc<AtomicBool>,
+    /// Snapshot replication; None ignores pull requests and grants.
+    pub peer: Option<Arc<Peer>>,
     running: Arc<Mutex<HashMap<String, ()>>>,
 }
 
@@ -67,6 +80,7 @@ where
             control_plane,
             inventory: Arc::default(),
             draining: Arc::default(),
+            peer: None,
             running: Arc::default(),
         }
     }
@@ -97,6 +111,7 @@ where
             memory_gb: self.info.memory_gb,
             hostd_version: env!("CARGO_PKG_VERSION").into(),
             running_job_ids: running,
+            peer_address: self.info.peer_address.clone(),
         })))
         .await?;
         let mut inbound = client.link(ReceiverStream::new(rx)).await?.into_inner();
@@ -171,10 +186,11 @@ where
                         });
                     }
                     Some(pb::link_response::Msg::PreFork(p)) => self.start_pre_fork(p),
-                    Some(pb::link_response::Msg::PullSnapshot(p)) => {
-                        // TODO: incremental zfs send/recv from the peer.
-                        tracing::info!(from = %p.from_host_id, "snapshot pull not implemented yet");
-                    }
+                    Some(pb::link_response::Msg::PullSnapshot(p)) => self.pull_snapshot(p),
+                    Some(pb::link_response::Msg::ServeSnapshot(g)) => match &self.peer {
+                        Some(peer) => peer.grants.allow(&g, SystemTime::now()),
+                        None => tracing::warn!("snapshot grant ignored: peer service disabled"),
+                    },
                     None => {}
                 }
             }
@@ -193,6 +209,25 @@ where
         tokio::task::spawn_blocking(move || match agent.pre_fork(&p, SystemTime::now()) {
             Ok(()) => tracing::debug!(repo = %p.repo, commit = %p.commit, "pre-forked job disk"),
             Err(e) => tracing::warn!(repo = %p.repo, error = %format!("{e:#}"), "pre-fork"),
+        });
+    }
+
+    /// Pulls a snapshot from a peer in the background and adds it to the
+    /// inventory, which tells the control plane on the next heartbeat.
+    fn pull_snapshot(&self, p: pb::PullSnapshot) {
+        let Some(peer) = self.peer.clone() else {
+            tracing::warn!(from = %p.from_host_id, "snapshot pull ignored: peer service disabled");
+            return;
+        };
+        let (inv, host_id) = (self.inventory.clone(), self.info.host_id.clone());
+        tokio::spawn(async move {
+            match replicate::pull(&host_id, &p, &peer.repl, &peer.opts).await {
+                Ok(r) => {
+                    tracing::info!(snapshot = %r.id, from = %p.from_host_id, "snapshot pulled");
+                    inv.put(r);
+                }
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "snapshot pull failed"),
+            }
         });
     }
 

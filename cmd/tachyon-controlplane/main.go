@@ -134,6 +134,7 @@ func main() {
 						log.Info("base image rollout", "image", tr.Ref.String(), "from", tr.From, "to", tr.To, "reason", tr.Reason)
 					}
 				}
+				core.ReconcileReplicas()
 			case <-report.C:
 				r := core.OffPeak.Report()
 				log.Info("off-peak class", "window", r.Window, "avg_util", r.AvgUtil, "base_util", r.AvgBaseUtil,
