@@ -91,6 +91,8 @@ Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9
 
 Set `TACHYON_DATABASE_URL` (e.g. `postgres://tachyon@db:5432/tachyon`) to keep jobs, pending runners, hosts, the prebuild registry and job records in Postgres; migrations run on start. After a restart, queued jobs are resubmitted and jobs running on hosts keep their reservations until the hosts reconnect and report results. Without it, state is in memory. The Postgres store tests run when `TACHYON_TEST_POSTGRES_DSN` is set.
 
+The nightly clean run is off unless repos opt in with `-nightly-repos owner/name,...`. Each night after `-nightly-hour` (UTC, default 3; `-1` disables it) the control plane re-runs each opted-in repo's default-branch run for its newest commit without a prebuild and reports divergence as a `Tachyon nightly clean run` check on the commit. The re-run repeats every job of that workflow run, non-Tachyon and deploy jobs included, so opt in only repos where that is safe. This needs the App's Actions (write) and Checks (write) permissions.
+
 ### Running hostd (Linux host)
 
 | Variable | Required | Default |

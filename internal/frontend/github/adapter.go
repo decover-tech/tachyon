@@ -38,6 +38,9 @@ type Adapter struct {
 	// keeps retrying queued jobs and doesn't sweep live runners
 	// (see persist.go).
 	Store store.Store
+	// Nightly, when set, runs one clean run per repo per night and reports
+	// divergence from the prebuild runs. Optional.
+	Nightly *Nightly
 
 	mu      sync.Mutex
 	core    jobapi.Core
@@ -147,6 +150,8 @@ type workflowJobEvent struct {
 	WorkflowJob struct {
 		ID           int64    `json:"id"`
 		RunID        int64    `json:"run_id"`
+		RunAttempt   int      `json:"run_attempt"`
+		Conclusion   string   `json:"conclusion"`
 		WorkflowName string   `json:"workflow_name"`
 		Name         string   `json:"name"`
 		HeadSHA      string   `json:"head_sha"`
@@ -225,6 +230,7 @@ func (a *Adapter) onWorkflowJob(ctx context.Context, e workflowJobEvent) error {
 		a.forgetPending(ctx, j.ID)
 		a.saveActive(ctx, j.RunnerName, e.Installation.ID, e.Repository.FullName)
 	case "completed":
+		a.Nightly.completed(j.ID, j.Conclusion, a.now())
 		a.mu.Lock()
 		if p, ok := a.pending[j.ID]; ok { // cancelled before it started
 			delete(a.pending, j.ID)
@@ -285,13 +291,15 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 		rc.DefaultBranch = e.Repository.DefaultBranch
 	}
 
+	trust := DeriveTrust(rc)
+	jobID := fmt.Sprintf("gh_%d", j.ID)
 	policy := jobapi.PrebuildLatestTrusted
-	if runsOn.Clean {
+	if runsOn.Clean || a.Nightly.queued(e, rc, trust, jobID, a.now()) {
 		policy = jobapi.PrebuildNone
 	}
 	sub := jobapi.Submission{
 		Spec: jobapi.Spec{
-			JobID:    fmt.Sprintf("gh_%d", j.ID),
+			JobID:    jobID,
 			Tenant:   fmt.Sprintf("gh_inst_%d", e.Installation.ID),
 			Repo:     "github.com/" + e.Repository.FullName,
 			Commit:   j.HeadSHA,
@@ -299,7 +307,7 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 			Image:    runsOn.Image,
 			Prebuild: jobapi.PrebuildRef{Repo: e.Repository.FullName, Policy: policy},
 			Volumes:  []jobapi.Volume{jobapi.DockerVolume},
-			Trust:    DeriveTrust(rc),
+			Trust:    trust,
 		},
 		Profile:    fmt.Sprintf("%s/%s/%s", e.Repository.FullName, j.WorkflowName, j.Name),
 		Deferrable: runsOn.Deferrable,
@@ -460,6 +468,8 @@ func (a *Adapter) Reconcile(ctx context.Context) {
 		}
 		known[p.runnerName] = true
 	}
+
+	a.Nightly.Tick(ctx, now, a.log())
 
 	for repo, inst := range repos {
 		runners, err := a.API.ListRunners(ctx, inst, repo)

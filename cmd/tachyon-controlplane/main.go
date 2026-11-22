@@ -66,6 +66,8 @@ func main() {
 	flag.DurationVar(&keyStore.JITTTL, "jit-ttl", secrets.DefaultJITTTL, "TTL of stored JIT runner configs")
 	prebuildInterval := flag.Duration("prebuild-interval", 10*time.Minute, "minimum time between push-triggered prebuilds of one repo")
 	prebuildNightly := flag.Int("prebuild-nightly-hour", 3, "UTC hour after which each repo's nightly prebuild refresh runs")
+	nightlyHour := flag.Int("nightly-hour", 3, "UTC hour after which each opted-in repo's nightly clean run starts; -1 disables it")
+	nightlyRepos := flag.String("nightly-repos", "", "comma-separated owner/name repos opted in to the nightly clean run, which re-runs every job of a default-branch workflow run (deploy jobs too) and needs the App's actions:write and checks:write permissions; empty disables it")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -168,6 +170,25 @@ func main() {
 		API:           ghClient,
 		Secrets:       keys,
 		Log:           log,
+	}
+	optedIn := map[string]bool{}
+	for _, r := range strings.Split(*nightlyRepos, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			optedIn[strings.ToLower(r)] = true
+		}
+	}
+	if *nightlyHour >= 0 && *nightlyHour < 24 && len(optedIn) > 0 {
+		adapter.Nightly = &github.Nightly{
+			API:   ghClient,
+			Hour:  *nightlyHour,
+			Repos: func(repo string) bool { return optedIn[strings.ToLower(repo)] },
+			PrebuildMatch: func(jobID string) prebuild.Match {
+				if rec := core.Record(jobID); rec != nil {
+					return prebuild.Match(rec.PrebuildMatch)
+				}
+				return ""
+			},
+		}
 	}
 	if db != nil {
 		core.Store, adapter.Store = db, db
