@@ -34,6 +34,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/billing/` | Go | Metering from the telemetry record: per-second runner time by VM size, per-repo prebuild allowance, storage above quota per GB-month |
 | `internal/secrets/` | Go | Key store for JIT configs and tokens (Vault/OpenBao KV v2, or in-memory for dev): `secret://` refs, short TTLs, redaction ([0002-key-store.md](docs/decisions/0002-key-store.md)) |
 | `deploy/observability/` | config | OTel Collector, Prometheus SLO rules, Grafana dashboards, ClickHouse job-record schema, local docker-compose stack |
+| `internal/abuse/` | Go | Abuse controls: free/trial plan limits and verification, CPU and network anomaly alerts with automatic cancel/suspend |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
 | `examples/node-go/` | – | A repo config and workflow using Tachyon |
 | `gen/` | Go | Generated from `proto/` by `buf generate`; checked in |

@@ -25,6 +25,7 @@ message LinkRequest {
     Heartbeat heartbeat = 2;
     JobEvent job_event = 3;
     JobResult job_result = 4;
+    JobUsage job_usage = 6;
   }
   // Set on job events and results. hostd keeps each one, across reconnects
   // and restarts, until the control plane acks its seq; it may resend after
@@ -109,6 +110,24 @@ message JobResult {
   // Echoed from AssignJob so a new prebuild records what it was built on.
   string base_image = 8;
   string commit = 9;
+}
+
+// A periodic resource sample for one running job, used for abuse detection
+// (mining, floods, scans). Counters are deltas over interval_ms. Network
+// fields are from the guest's point of view: tx is traffic the guest sent.
+message JobUsage {
+  string job_id = 1;
+  google.protobuf.Timestamp at = 2;
+  uint32 interval_ms = 3;
+  // Average busy vCPUs over the interval (cgroup cpu.stat).
+  double busy_vcpu = 4;
+  uint64 tx_bytes = 5;
+  uint64 rx_bytes = 6;
+  uint64 tx_packets = 7;
+  // Outbound connections opened and distinct destination addresses seen in
+  // the interval; 0 when the host does not track flows.
+  uint32 new_connections = 8;
+  uint32 distinct_destinations = 9;
 }
 
 // ---- control plane -> hostd ----

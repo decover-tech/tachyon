@@ -177,6 +177,8 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 			s.onJobEvent(msg.JobEvent)
 		case *hostlinkv1.LinkRequest_JobResult:
 			s.onJobResult(hc, msg.JobResult)
+		case *hostlinkv1.LinkRequest_JobUsage:
+			c.onJobUsage(stream.Context(), msg.JobUsage)
 		case *hostlinkv1.LinkRequest_Hello:
 			return fmt.Errorf("host %s: duplicate Hello", hc.id)
 		}
@@ -277,6 +279,7 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 		})
 		c.replicatePrebuild(hc.id, pb)
 	}
+	c.finishAbuse(r)
 	c.log().Info("job finished", "job", r.GetJobId(), "host", hc.id, "outcome", r.GetOutcome().String())
 	if c.Results != nil {
 		c.Results.OnResult(context.Background(), jobapi.Result{

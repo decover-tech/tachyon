@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/abuse"
 	"github.com/decover-tech/tachyon/internal/cache"
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
@@ -85,6 +86,7 @@ func main() {
 	clickhouseUser := flag.String("clickhouse-user", "", "ClickHouse user")
 	priceOwned := flag.Float64("price-owned-vcpu-hour", 0, "owned capacity cost per vCPU-hour, for cost per job-minute")
 	priceBurst := flag.Float64("price-burst-vcpu-hour", 0, "burst capacity cost per vCPU-hour, for cost per job-minute")
+	unknownPlan := flag.String("unknown-tenant-plan", "paid", "plan assumed for tenants with no account record (free, trial, paid; empty refuses them)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -199,11 +201,15 @@ func main() {
 	} else {
 		log.Warn("TACHYON_DATABASE_URL not set: state is in memory and lost on restart")
 	}
+	// No account store yet: every tenant gets -unknown-tenant-plan.
+	gate := &abuse.Gate{Accounts: &abuse.MemAccounts{}, UnknownPlan: abuse.Plan(*unknownPlan)}
 	core := &controlplane.Core{
 		Scheduler: scheduler.New(nil),
 		Images:    pins,
 		Prebuilds: prebuilds,
 		Secrets:   keys,
+		Limits:    gate,
+		Anomalies: &abuse.Monitor{Alerter: abuse.LogAlerter{Log: log}, Suspender: gate, Log: log},
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
 		Log:       log,

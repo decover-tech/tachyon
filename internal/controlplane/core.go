@@ -13,6 +13,7 @@ import (
 	"time"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/abuse"
 	"github.com/decover-tech/tachyon/internal/cache"
 	"github.com/decover-tech/tachyon/internal/jobapi"
 	"github.com/decover-tech/tachyon/internal/mirrors"
@@ -107,6 +108,12 @@ type Core struct {
 	Metrics    *telemetry.Metrics
 	JobRecords JobRecordSink
 	Pricing    telemetry.Pricing
+	// Limits, when set, refuses jobs over free/trial plan limits or from
+	// unverified or suspended tenants.
+	Limits *abuse.Gate
+	// Anomalies, when set, watches running jobs for mining and attack
+	// patterns; alerts that call for it cancel the job.
+	Anomalies *abuse.Monitor
 
 	mu       sync.Mutex
 	pbJobs   map[string]string // prebuild build job ID -> repo (prebuilds.go)
@@ -201,7 +208,7 @@ func (c *Core) Hint(ctx context.Context, h jobapi.Hint) error {
 }
 
 // Submit plans, places and dispatches a job.
-func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
+func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 	spec := &sub.Spec
 	pinned, err := c.Images.Pin(spec.Image)
 	if err != nil {
@@ -210,6 +217,16 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	spec.Image = pinned
 	if err := spec.Validate(); err != nil {
 		return err
+	}
+	if c.Limits != nil {
+		if err := c.Limits.Admit(ctx, sub); err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				c.Limits.Release(spec.JobID)
+			}
+		}()
 	}
 	if sub.QueuedAt.IsZero() {
 		sub.QueuedAt = c.now()
@@ -288,6 +305,9 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 			return err
 		}
 		c.noteJob(ctx, sub, store.JobBurst, nil)
+		// Burst results do not come back over hostlink, so the job does
+		// not hold a plan slot. TODO: count burst jobs too.
+		defer c.releaseLimits(spec.JobID)
 		if err := c.Burst.Submit(ctx, sub); err != nil {
 			return err
 		}
@@ -332,6 +352,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	// Recorded before sending: after a restart the reservation is restored
 	// and released by the host's result.
 	c.noteJob(ctx, sub, store.JobAssigned, &a)
+	c.trackAbuse(ctx, spec, a.HostID)
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
 	c.offPeakStarted(sub, overdue)
 	return nil
