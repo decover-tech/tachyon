@@ -272,6 +272,27 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 		c.replicatePrebuild(hc.id, pb)
 	}
 	c.log().Info("job finished", "job", r.GetJobId(), "host", hc.id, "outcome", r.GetOutcome().String())
+	if c.Results != nil {
+		c.Results.OnResult(context.Background(), jobapi.Result{
+			JobID:   r.GetJobId(),
+			Outcome: outcomeFromProto(r.GetOutcome()),
+			Error:   r.GetError(),
+		})
+	}
+}
+
+func outcomeFromProto(o hostlinkv1.JobResult_Outcome) jobapi.Outcome {
+	switch o {
+	case hostlinkv1.JobResult_OUTCOME_SUCCEEDED:
+		return jobapi.OutcomeSucceeded
+	case hostlinkv1.JobResult_OUTCOME_FAILED:
+		return jobapi.OutcomeFailed
+	case hostlinkv1.JobResult_OUTCOME_INFRA_ERROR:
+		return jobapi.OutcomeInfra
+	case hostlinkv1.JobResult_OUTCOME_CANCELLED:
+		return jobapi.OutcomeCancelled
+	}
+	return ""
 }
 
 // Meter receives each finished job's telemetry record; billing.Meter

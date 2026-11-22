@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -74,6 +75,7 @@ func main() {
 	mirrorSecondary := flag.String("mirror-secondary", "", "secondary tachyon-mirror base URL")
 	gitRepos := flag.String("mirror-git-repos", "", "comma-separated public owner/name repos the mirrors' -git-repos serve; only jobs for these repos fetch git through the mirror (never list private repos)")
 	allowedOwners := flag.String("github-allowed-owners", "", "comma-separated GitHub orgs/users whose repos get runners (empty: any installation)")
+	rerunInfra := flag.String("github-rerun-infra", "", "comma-separated GitHub App installation IDs opted in to re-running jobs that failed for infrastructure reasons (needs Actions write)")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -197,6 +199,19 @@ func main() {
 			adapter.AllowedOwners = append(adapter.AllowedOwners, o)
 		}
 	}
+	if *rerunInfra != "" {
+		optedInInfra := map[int64]bool{}
+		for _, s := range strings.Split(*rerunInfra, ",") {
+			id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+			if err != nil {
+				log.Error("bad -github-rerun-infra installation ID", "value", s)
+				os.Exit(2)
+			}
+			optedInInfra[id] = true
+		}
+		adapter.RerunInfra = func(inst int64, _ string) bool { return optedInInfra[inst] }
+	}
+	core.Results = adapter
 	optedIn := map[string]bool{}
 	for _, r := range strings.Split(*nightlyRepos, ",") {
 		if r = strings.TrimSpace(r); r != "" {

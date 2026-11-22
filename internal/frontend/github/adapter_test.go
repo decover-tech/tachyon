@@ -22,15 +22,46 @@ type fakeAPI struct {
 	created []string // runner names
 	deleted []int64
 	runners []Runner
+	reruns  []int64 // GitHub job IDs
+	calls   int
+
+	rerunCalls int // RerunJob calls, failed or not
+
+	// err, if set, is returned by every call (and counted in calls).
+	err error
+}
+
+func (f *fakeAPI) fail() error {
+	f.calls++
+	return f.err
 }
 
 func (f *fakeAPI) RunContext(context.Context, int64, string, int64) (RunContext, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return RunContext{}, err
+	}
 	return f.rc, nil
+}
+
+func (f *fakeAPI) RerunJob(_ context.Context, _ int64, _ string, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rerunCalls++
+	if err := f.fail(); err != nil {
+		return err
+	}
+	f.reruns = append(f.reruns, id)
+	return nil
 }
 
 func (f *fakeAPI) CreateJITConfig(_ context.Context, _ int64, _, name string, _ []string) (JITRunner, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return JITRunner{}, err
+	}
 	f.nextID++
 	f.created = append(f.created, name)
 	return JITRunner{RunnerID: f.nextID, JITConfig: []byte("jit-" + name)}, nil
@@ -39,12 +70,18 @@ func (f *fakeAPI) CreateJITConfig(_ context.Context, _ int64, _, name string, _ 
 func (f *fakeAPI) ListRunners(context.Context, int64, string) ([]Runner, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return nil, err
+	}
 	return append([]Runner(nil), f.runners...), nil
 }
 
 func (f *fakeAPI) DeleteRunner(_ context.Context, _ int64, _ string, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.fail(); err != nil {
+		return err
+	}
 	f.deleted = append(f.deleted, id)
 	return nil
 }

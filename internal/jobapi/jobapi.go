@@ -228,3 +228,27 @@ type Frontend interface {
 	// Handler serves the platform's webhooks and forwards work to core.
 	Handler(core Core) http.Handler
 }
+
+// Outcome is how a job ended, as reported by the host that ran it.
+type Outcome string
+
+const (
+	OutcomeSucceeded Outcome = "succeeded"
+	OutcomeFailed    Outcome = "failed"      // the job's own failure
+	OutcomeInfra     Outcome = "infra_error" // Tachyon's failure; eligible for opt-in re-run
+	OutcomeCancelled Outcome = "cancelled"
+)
+
+// Result is the end of one job, passed back to the frontend that submitted it.
+type Result struct {
+	JobID   string
+	Outcome Outcome
+	Error   string
+}
+
+// ResultHandler is implemented by frontends that act on job results, such
+// as re-running jobs that failed for infrastructure reasons. It must not
+// block: the core calls it from the host link.
+type ResultHandler interface {
+	OnResult(ctx context.Context, r Result)
+}

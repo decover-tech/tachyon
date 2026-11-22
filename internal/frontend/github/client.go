@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -129,9 +130,41 @@ func (c *Client) installationToken(ctx context.Context, inst int64) (string, err
 type APIError struct {
 	Status int
 	Body   string
+	// RetryAfter is the Retry-After header (secondary rate limits); zero if absent.
+	RetryAfter time.Duration
+	// Remaining is X-RateLimit-Remaining, or -1 if absent.
+	Remaining int
+	// Reset is X-RateLimit-Reset, when the primary limit refills; zero if absent.
+	Reset time.Time
 }
 
 func (e *APIError) Error() string { return fmt.Sprintf("github: HTTP %d: %s", e.Status, e.Body) }
+
+// RateLimited reports whether GitHub refused the request because of a
+// primary or secondary rate limit.
+func (e *APIError) RateLimited() bool {
+	switch e.Status {
+	case http.StatusTooManyRequests:
+		return true
+	case http.StatusForbidden:
+		return e.Remaining == 0 || e.RetryAfter > 0 || strings.Contains(strings.ToLower(e.Body), "rate limit")
+	}
+	return false
+}
+
+func newAPIError(resp *http.Response, body []byte) *APIError {
+	e := &APIError{Status: resp.StatusCode, Body: string(body), Remaining: -1}
+	if v, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && v > 0 {
+		e.RetryAfter = time.Duration(v) * time.Second
+	}
+	if v, err := strconv.Atoi(resp.Header.Get("X-RateLimit-Remaining")); err == nil {
+		e.Remaining = v
+	}
+	if v, err := strconv.ParseInt(resp.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil && v > 0 {
+		e.Reset = time.Unix(v, 0)
+	}
+	return e
+}
 
 func (c *Client) do(ctx context.Context, auth, method, path string, body, out any) error {
 	var rd io.Reader
@@ -159,7 +192,7 @@ func (c *Client) do(ctx context.Context, auth, method, path string, body, out an
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode/100 != 2 {
-		return &APIError{Status: resp.StatusCode, Body: string(data)}
+		return newAPIError(resp, data)
 	}
 	if out != nil && len(data) > 0 {
 		return json.Unmarshal(data, out)
@@ -269,4 +302,8 @@ func (c *Client) DeleteRunner(ctx context.Context, inst int64, repo string, runn
 		return nil // already gone
 	}
 	return err
+}
+
+func (c *Client) RerunJob(ctx context.Context, inst int64, repo string, jobID int64) error {
+	return c.asInstallation(ctx, inst, http.MethodPost, fmt.Sprintf("/repos/%s/actions/jobs/%d/rerun", repo, jobID), nil, nil)
 }

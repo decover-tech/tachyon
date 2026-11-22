@@ -76,11 +76,7 @@ func (a *Adapter) Restore(ctx context.Context) (int, error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.pending == nil {
-		a.pending = map[int64]*pendingJob{}
-		a.active = map[string]bool{}
-		a.repos = map[string]int64{}
-	}
+	a.initLocked()
 	for _, p := range pending {
 		a.pending[p.ExternalID] = &pendingJob{
 			id:             p.ExternalID,
@@ -88,11 +84,15 @@ func (a *Adapter) Restore(ctx context.Context) (int, error) {
 			repo:           p.Repo,
 			labels:         p.Labels,
 			sub:            p.Submission,
-			runnerID:       p.RunnerID,
-			runnerName:     p.RunnerName,
-			secretRef:      p.SecretRef,
-			submittedAt:    p.SubmittedAt,
-			attempts:       p.Attempts,
+			// Rows are written once a runner exists and the job was
+			// submitted, so there is nothing left to prepare.
+			prepared:    true,
+			dispatched:  true,
+			runnerID:    p.RunnerID,
+			runnerName:  p.RunnerName,
+			secretRef:   p.SecretRef,
+			submittedAt: p.SubmittedAt,
+			attempts:    p.Attempts,
 		}
 		a.repos[p.Repo] = p.InstallationID
 	}

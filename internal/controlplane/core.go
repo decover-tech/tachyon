@@ -99,6 +99,9 @@ type Core struct {
 	// http.https://github.com/.extraheader to the rewritten mirror URL),
 	// and a repo the mirror doesn't serve gains nothing. nil means none.
 	GitMirrored func(repo string) bool
+	// Results, if set, receives every job result (e.g. the GitHub adapter,
+	// for opt-in re-runs of infrastructure failures).
+	Results jobapi.ResultHandler
 
 	mu       sync.Mutex
 	pbJobs   map[string]string // prebuild build job ID -> repo (prebuilds.go)
