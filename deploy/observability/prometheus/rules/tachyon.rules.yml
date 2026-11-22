@@ -1,0 +1,157 @@
+# Tachyon SLOs (docs/architecture.md, "Reliability and operations"):
+#   - 99.9% of queued jobs picked up
+#   - 99.95% control plane availability
+#   - p95 pickup under 10 s, even while a host or service is failing
+#
+# The two ratio SLOs alert on error-budget burn rate over a 30-day window
+# (multi-window, multi-burn-rate: page at 14.4x over 1h/5m, ticket at 6x
+# over 6h/30m). The latency SLO alerts on the fleet p95 directly.
+groups:
+  - name: tachyon-slo-recording
+    interval: 30s
+    rules:
+      # Pickup: share of queued jobs whose runner did not come online on
+      # owned capacity and that were not handed to burst capacity.
+      - record: tachyon:pickup_errors:ratio_rate5m
+        expr: 1 - ((sum(rate(tachyon_jobs_picked_up_total[5m])) + (sum(rate(tachyon_jobs_burst_total[5m])) or vector(0))) / sum(rate(tachyon_jobs_queued_total[5m])))
+      - record: tachyon:pickup_errors:ratio_rate30m
+        expr: 1 - ((sum(rate(tachyon_jobs_picked_up_total[30m])) + (sum(rate(tachyon_jobs_burst_total[30m])) or vector(0))) / sum(rate(tachyon_jobs_queued_total[30m])))
+      - record: tachyon:pickup_errors:ratio_rate1h
+        expr: 1 - ((sum(rate(tachyon_jobs_picked_up_total[1h])) + (sum(rate(tachyon_jobs_burst_total[1h])) or vector(0))) / sum(rate(tachyon_jobs_queued_total[1h])))
+      - record: tachyon:pickup_errors:ratio_rate6h
+        expr: 1 - ((sum(rate(tachyon_jobs_picked_up_total[6h])) + (sum(rate(tachyon_jobs_burst_total[6h])) or vector(0))) / sum(rate(tachyon_jobs_queued_total[6h])))
+      - record: tachyon:pickup_errors:ratio_rate30d
+        expr: 1 - ((sum(increase(tachyon_jobs_picked_up_total[30d])) + (sum(increase(tachyon_jobs_burst_total[30d])) or vector(0))) / sum(increase(tachyon_jobs_queued_total[30d])))
+
+      # Control plane: share of failed /healthz probes.
+      - record: tachyon:controlplane_errors:ratio_rate5m
+        expr: 1 - avg(avg_over_time(probe_success{job="tachyon-controlplane"}[5m]))
+      - record: tachyon:controlplane_errors:ratio_rate30m
+        expr: 1 - avg(avg_over_time(probe_success{job="tachyon-controlplane"}[30m]))
+      - record: tachyon:controlplane_errors:ratio_rate1h
+        expr: 1 - avg(avg_over_time(probe_success{job="tachyon-controlplane"}[1h]))
+      - record: tachyon:controlplane_errors:ratio_rate6h
+        expr: 1 - avg(avg_over_time(probe_success{job="tachyon-controlplane"}[6h]))
+      - record: tachyon:controlplane_errors:ratio_rate30d
+        expr: 1 - avg(avg_over_time(probe_success{job="tachyon-controlplane"}[30d]))
+
+      # Pickup latency quantiles, fleet-wide and per region and VM size.
+      - record: tachyon:pickup_seconds:p95_10m
+        expr: histogram_quantile(0.95, sum by (le) (rate(tachyon_job_pickup_seconds_bucket[10m])))
+      - record: tachyon:pickup_seconds:p50_10m
+        expr: histogram_quantile(0.50, sum by (le) (rate(tachyon_job_pickup_seconds_bucket[10m])))
+      - record: region_vcpu:tachyon_job_pickup_seconds:p95_10m
+        expr: histogram_quantile(0.95, sum by (le, region, vcpu) (rate(tachyon_job_pickup_seconds_bucket[10m])))
+
+  - name: tachyon-slo-alerts
+    rules:
+      - alert: TachyonPickupSLOFastBurn
+        expr: |
+          tachyon:pickup_errors:ratio_rate1h > (14.4 * 0.001)
+          and
+          tachyon:pickup_errors:ratio_rate5m > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: page
+          slo: pickup
+        annotations:
+          summary: Queued jobs are not being picked up
+          description: >-
+            {{ $value | humanizePercentage }} of queued jobs in the last hour
+            have no runner online. At this rate the 30-day 99.9% pickup
+            budget is gone in about two days.
+
+      - alert: TachyonPickupSLOSlowBurn
+        expr: |
+          tachyon:pickup_errors:ratio_rate6h > (6 * 0.001)
+          and
+          tachyon:pickup_errors:ratio_rate30m > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: ticket
+          slo: pickup
+        annotations:
+          summary: Pickup error budget burning
+          description: >-
+            {{ $value | humanizePercentage }} of queued jobs in the last 6h
+            were not picked up (SLO 99.9%).
+
+      - alert: TachyonControlPlaneSLOFastBurn
+        expr: |
+          tachyon:controlplane_errors:ratio_rate1h > (14.4 * 0.0005)
+          and
+          tachyon:controlplane_errors:ratio_rate5m > (14.4 * 0.0005)
+        for: 2m
+        labels:
+          severity: page
+          slo: controlplane
+        annotations:
+          summary: Control plane failing health checks
+          description: >-
+            {{ $value | humanizePercentage }} of control plane probes failed
+            in the last hour (SLO 99.95%). Running jobs keep running; new
+            jobs wait in GitHub's queue.
+
+      - alert: TachyonControlPlaneSLOSlowBurn
+        expr: |
+          tachyon:controlplane_errors:ratio_rate6h > (6 * 0.0005)
+          and
+          tachyon:controlplane_errors:ratio_rate30m > (6 * 0.0005)
+        for: 15m
+        labels:
+          severity: ticket
+          slo: controlplane
+        annotations:
+          summary: Control plane error budget burning
+          description: >-
+            {{ $value | humanizePercentage }} of control plane probes failed
+            in the last 6h (SLO 99.95%).
+
+      - alert: TachyonPickupLatencySLO
+        expr: tachyon:pickup_seconds:p95_10m > 10
+        for: 10m
+        labels:
+          severity: page
+          slo: pickup_latency
+        annotations:
+          summary: p95 pickup above 10 s
+          description: >-
+            Fleet p95 pickup (webhook received to runner online) is
+            {{ $value | humanizeDuration }}; the SLO is under 10 s even
+            during a host or service failure.
+
+      - alert: TachyonPickupLatencyTarget
+        expr: region_vcpu:tachyon_job_pickup_seconds:p95_10m > 5
+        for: 30m
+        labels:
+          severity: ticket
+          slo: pickup_latency
+        annotations:
+          summary: p95 pickup above the 5 s target in {{ $labels.region }} ({{ $labels.vcpu }} vCPU)
+          description: >-
+            p95 pickup is {{ $value | humanizeDuration }}; the target is p95
+            under 5 s and p50 under 2 s.
+
+  - name: tachyon-fleet-alerts
+    rules:
+      - alert: TachyonJobRecordsDropped
+        expr: increase(tachyon_job_records_dropped_total[15m]) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: Job records dropped before reaching ClickHouse
+          description: >-
+            {{ $value }} job records were dropped in 15 minutes because
+            ClickHouse fell behind. Billing and minutes-saved reports for
+            those jobs are incomplete.
+
+      - alert: TachyonHostCPUSteal
+        expr: tachyon_host_cpu_steal_ratio > 0.1
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: High CPU steal on {{ $labels.host }}
+          description: >-
+            {{ $value | humanizePercentage }} CPU steal on {{ $labels.host }};
+            jobs there run slower than their profile predicts.

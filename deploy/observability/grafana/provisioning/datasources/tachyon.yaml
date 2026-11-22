@@ -1,0 +1,22 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: tachyon-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  # Needs the grafana-clickhouse-datasource plugin.
+  - name: ClickHouse
+    uid: tachyon-clickhouse
+    type: grafana-clickhouse-datasource
+    jsonData:
+      host: clickhouse
+      port: 9000
+      protocol: native
+      defaultDatabase: tachyon
+      username: ${CLICKHOUSE_USER}
+    secureJsonData:
+      password: ${CLICKHOUSE_PASSWORD}

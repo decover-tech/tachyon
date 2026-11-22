@@ -336,3 +336,14 @@ func (s *Scheduler) UtilizationSplit() (total, deferrable float64) {
 	}
 	return s.utilizationLocked(), def / vcpu
 }
+
+// Load returns a host's reserved CPU over its physical vCPUs; above 1 the
+// host is oversubscribed.
+func (s *Scheduler) Load(hostID string) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if h := s.hosts[hostID]; h != nil && h.VCPU > 0 {
+		return h.cpuUsed / float64(h.VCPU)
+	}
+	return 0
+}

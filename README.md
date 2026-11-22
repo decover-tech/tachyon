@@ -30,9 +30,10 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/images/` | Go | Base image pipeline: build plan from the runner-images Packer template, manifest, ed25519 signing, SPDX SBOM, canary-first rollout and version retention |
 | `cmd/tachyon-image/` | Go | Pipeline tool `images/*/build.sh` calls: `plan`, `sbom`, `manifest`, `sign`, `verify`, `diff` |
 | `images/ubuntu-24.04/` | – | `image.yml` (pinned runner-images commit, trims) and `build.sh` (Linux builder: ext4 image, SBOM, unsigned manifest); rebuilt weekly by `.github/workflows/base-image.yml`, which signs the manifest in a separate job that never runs build code |
-| `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
+| `internal/telemetry/` | Go | Per-job phase record (pickup, billable seconds, cost), OpenTelemetry fleet metrics, ClickHouse export |
 | `internal/billing/` | Go | Metering from the telemetry record: per-second runner time by VM size, per-repo prebuild allowance, storage above quota per GB-month |
 | `internal/secrets/` | Go | Key store for JIT configs and tokens (Vault/OpenBao KV v2, or in-memory for dev): `secret://` refs, short TTLs, redaction ([0002-key-store.md](docs/decisions/0002-key-store.md)) |
+| `deploy/observability/` | config | OTel Collector, Prometheus SLO rules, Grafana dashboards, ClickHouse job-record schema, local docker-compose stack |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
 | `examples/node-go/` | – | A repo config and workflow using Tachyon |
 | `gen/` | Go | Generated from `proto/` by `buf generate`; checked in |
@@ -113,6 +114,8 @@ and point the control plane at both with `-mirror-primary https://mirror-a.r1.ta
 
 Only public content is mirrored: the mirror fetches upstream anonymously, requests that carry credentials pass straight through uncached, private images get a 404 so the client falls back to the registry, the apt proxy only serves public Ubuntu/Debian archives, and the git mirror redirects any repo it can't clone anonymously to GitHub.
 
+Observability is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `http://otel-collector:4318`) to export metrics, and `-clickhouse-url` (with `-clickhouse-user` and `TACHYON_CLICKHOUSE_PASSWORD`) to write one row per finished job to `tachyon.job_records`. `-price-owned-vcpu-hour` and `-price-burst-vcpu-hour` set the capacity cost behind the cost-per-job-minute panels. See [deploy/observability](deploy/observability) for the collector, dashboards, SLO alerts and schema.
+
 ### Running hostd (Linux host)
 
 | Variable | Required | Default |
@@ -135,6 +138,7 @@ Only public content is mirrored: the mirror fetches upstream anonymously, reques
 | `TACHYON_PEER_ADDRESS` | no | address peers use to pull snapshots from this host, e.g. `http://h1.internal:7443`; unset = serve no pulls |
 | `TACHYON_PEER_LISTEN`, `TACHYON_IMAGES_DIR` | no | `0.0.0.0:7443`, `/var/lib/tachyon/images` (base images as `<name@version>.img`) |
 | `TACHYON_STATE_DIR` | no | `/var/lib/tachyon/hostd`: unacked job events/results and running-job markers, kept across restarts |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | no | unset: no metrics export. OTLP/gRPC, e.g. `http://otel-collector:4317` |
 
 `tachyon-hostd prepare-image ubuntu-24.04@2026-11-16` verifies an image in `TACHYON_IMAGES` against the keys in `TACHYON_IMAGE_TRUST` (PEM), then boots it once per VM size and leaves paused snapshots in `<image>/snapshots/<vcpu>/` (point `TACHYON_BASE_SNAPSHOTS` there). It boots `TACHYON_GUEST_KERNEL` when the image ships no kernel.
 
@@ -156,6 +160,5 @@ Not built yet:
 - **Mirror rollout.** `tachyon-mirror` is built and tested against fake upstreams only; provisioning the instances, TLS certificates, and feeding the git mirror the list of repos Tachyon builds (a flag for now) are not done.
 - **Secrets persistence.** Control plane state is in Postgres, but secrets (JIT runner configs) are still in memory until a managed key store lands; after a restart, jobs whose JIT config was lost are re-dispatched by the adapter's reconcile loop.
 - **Host certificate issuer** backed by the key store, and on-host renewal. mTLS and host identity checks on the host link are built; only the `tachyon hostcert` development issuer exists.
-- **Observability export** (OpenTelemetry/Prometheus/ClickHouse) and billing.
 
 Open decisions D2 to D6 and the open questions are listed at the end of the [design doc](docs/architecture.md#risks-open-questions-and-decisions).

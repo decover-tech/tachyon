@@ -28,6 +28,7 @@ type hostConn struct {
 	out           chan *hostlinkv1.LinkResponse
 	snaps         []*hostlinkv1.SnapshotRef
 	draining      bool
+	hb            *hostlinkv1.Heartbeat // latest, for host metrics
 	closed        chan struct{}
 	// Last host view written to Core.Store; guarded by Core.mu.
 	saved      *scheduler.Host
@@ -205,6 +206,7 @@ func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostli
 	c.mu.Lock()
 	hc.snaps = hb.GetSnapshots()
 	hc.draining = hb.GetDraining()
+	hc.hb = hb
 	c.mu.Unlock()
 	h := scheduler.Host{
 		ID:            hc.id,
@@ -239,7 +241,7 @@ func (s *HostLink) onJobEvent(ev *hostlinkv1.JobEvent) {
 	if ev.GetAt() != nil {
 		at = ev.GetAt().AsTime()
 	}
-	rec.Mark(p, at)
+	s.Core.markPhase(rec, p, at)
 	s.Core.saveRecord(context.Background(), rec)
 }
 
@@ -258,6 +260,7 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 	if ir, ok := c.Images.(ImageRollout); ok {
 		ir.ObserveResult(r.GetJobId(), r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_INFRA_ERROR)
 	}
+	c.observeJobFinished(r)
 	c.finishJob(context.Background(), r.GetJobId())
 	c.saveRecord(context.Background(), c.Record(r.GetJobId()))
 	if pb := r.GetPrebuild(); pb != nil && pb.GetKey() != "" {

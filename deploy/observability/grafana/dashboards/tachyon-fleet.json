@@ -1,0 +1,998 @@
+{
+  "uid": "tachyon-fleet",
+  "title": "Tachyon fleet",
+  "description": "Pickup latency, prebuild and cache hit rates, host utilization, cost and SLOs. Source: Prometheus.",
+  "tags": [
+    "tachyon"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "utc",
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "region",
+        "label": "Region",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "tachyon-prometheus"
+        },
+        "query": {
+          "query": "label_values(tachyon_job_pickup_seconds_bucket, region)",
+          "refId": "V"
+        },
+        "definition": "label_values(tachyon_job_pickup_seconds_bucket, region)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "vcpu",
+        "label": "VM size",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "tachyon-prometheus"
+        },
+        "query": {
+          "query": "label_values(tachyon_job_pickup_seconds_bucket, vcpu)",
+          "refId": "V"
+        },
+        "definition": "label_values(tachyon_job_pickup_seconds_bucket, vcpu)",
+        "includeAll": true,
+        "multi": true,
+        "allValue": ".*",
+        "refresh": 2,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "SLOs",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Pickup success (30d, SLO 99.9%)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0.99,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.999
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "1 - tachyon:pickup_errors:ratio_rate30d",
+          "legendFormat": "picked up"
+        }
+      ],
+      "id": 2,
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Control plane availability (30d, SLO 99.95%)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0.99,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.9995
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "1 - tachyon:controlplane_errors:ratio_rate30d",
+          "legendFormat": "available"
+        }
+      ],
+      "id": 3,
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Fleet p95 pickup (SLO < 10 s)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon:pickup_seconds:p95_10m",
+          "legendFormat": "p95"
+        }
+      ],
+      "id": 4,
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Fleet p50 pickup (target < 2 s)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon:pickup_seconds:p50_10m",
+          "legendFormat": "p50"
+        }
+      ],
+      "id": 5,
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      }
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Pickup",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Pickup p50 by region and size",
+      "description": "Webhook received to runner online.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, region, vcpu) (rate(tachyon_job_pickup_seconds_bucket{region=~\"$region\", vcpu=~\"$vcpu\"}[$__rate_interval])))",
+          "legendFormat": "{{region}} {{vcpu}}x p50"
+        }
+      ],
+      "id": 7,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 7
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Pickup p95 by region and size",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, region, vcpu) (rate(tachyon_job_pickup_seconds_bucket{region=~\"$region\", vcpu=~\"$vcpu\"}[$__rate_interval])))",
+          "legendFormat": "{{region}} {{vcpu}}x p95"
+        }
+      ],
+      "id": 8,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 7
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Jobs queued vs picked up",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum(rate(tachyon_jobs_queued_total[$__rate_interval])) * 60",
+          "legendFormat": "queued / min"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum(rate(tachyon_jobs_picked_up_total{region=~\"$region\", vcpu=~\"$vcpu\"}[$__rate_interval])) * 60",
+          "legendFormat": "picked up / min"
+        }
+      ],
+      "id": 9,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Warm VMs by size",
+      "description": "Paused VMs ready for assignment; zero means jobs wait for a restore.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum by (vcpu) (tachyon_host_warm_vms{region=~\"$region\", vcpu=~\"$vcpu\"})",
+          "legendFormat": "{{vcpu}}x"
+        }
+      ],
+      "id": 10,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+      }
+    },
+    {
+      "id": 11,
+      "type": "row",
+      "title": "Prebuilds and cache",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Prebuild hit rate",
+      "description": "Share of finished jobs that forked a full or partial prebuild, or none.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum by (prebuild_match) (rate(tachyon_jobs_finished_total{region=~\"$region\", vcpu=~\"$vcpu\"}[$__rate_interval])) / ignoring (prebuild_match) group_left sum(rate(tachyon_jobs_finished_total{region=~\"$region\", vcpu=~\"$vcpu\"}[$__rate_interval]))",
+          "legendFormat": "{{prebuild_match}}"
+        }
+      ],
+      "id": 12,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache hit rate",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum(rate(tachyon_cache_requests_total{result=\"hit\", region=~\"$region\"}[$__rate_interval])) / sum(rate(tachyon_cache_requests_total{region=~\"$region\"}[$__rate_interval]))",
+          "legendFormat": "hit rate"
+        }
+      ],
+      "id": 13,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 24
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache restore throughput",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum by (region) (rate(tachyon_cache_restore_bytes_total{region=~\"$region\"}[$__rate_interval]))",
+          "legendFormat": "{{region}} served"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum by (region) (rate(tachyon_cache_restore_bytes_total{region=~\"$region\"}[$__rate_interval])) / sum by (region) (rate(tachyon_cache_restore_seconds_sum{region=~\"$region\"}[$__rate_interval]))",
+          "legendFormat": "{{region}} per restore"
+        }
+      ],
+      "id": 14,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 32
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache restore p95",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, region) (rate(tachyon_cache_restore_seconds_bucket{region=~\"$region\"}[$__rate_interval])))",
+          "legendFormat": "{{region}}"
+        }
+      ],
+      "id": 15,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 32
+      }
+    },
+    {
+      "id": 16,
+      "type": "row",
+      "title": "Hosts and oversubscription",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 40
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Host CPU busy",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon_host_cpu_busy_ratio{region=~\"$region\"}",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "id": 17,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Host CPU reserved (above 1 = oversubscribed)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon_host_cpu_reserved_ratio{region=~\"$region\"}",
+          "legendFormat": "{{host}} reserved"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon_host_oversubscription_ratio{region=~\"$region\"}",
+          "legendFormat": "{{host}} allowed"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon_fleet_cpu_reserved_ratio",
+          "legendFormat": "fleet"
+        }
+      ],
+      "id": 18,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Oversubscription slowdown (median run time, oversubscribed / not)",
+      "description": "Crude: job mix differs between hosts. The Job analytics dashboard normalizes per repo.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1.1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(tachyon_job_run_seconds_bucket{oversubscribed=\"true\", region=~\"$region\", vcpu=~\"$vcpu\"}[1h]))) / histogram_quantile(0.5, sum by (le) (rate(tachyon_job_run_seconds_bucket{oversubscribed=\"false\", region=~\"$region\", vcpu=~\"$vcpu\"}[1h])))",
+          "legendFormat": "slowdown"
+        }
+      ],
+      "id": 19,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Host CPU steal",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon_host_cpu_steal_ratio{region=~\"$region\"}",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "id": 20,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Host share of pickup p95 (assignment to VM resumed, from hostd)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, region, vcpu) (rate(tachyon_hostd_job_start_seconds_bucket{region=~\"$region\", vcpu=~\"$vcpu\"}[$__rate_interval])))",
+          "legendFormat": "{{region}} {{vcpu}}x"
+        }
+      ],
+      "id": 21,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 57
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Running jobs per host (hostd)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon_hostd_running_jobs{region=~\"$region\"}",
+          "legendFormat": "{{host}}"
+        }
+      ],
+      "id": 22,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 57
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Connected hosts",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon_hosts_connected",
+          "legendFormat": "hosts"
+        }
+      ],
+      "id": 23,
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 65
+      }
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "Cost",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 73
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Cost per job-minute",
+      "description": "Capacity cost over billable runner minutes, owned versus burst.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum by (capacity) (rate(tachyon_job_cost_usd_total{region=~\"$region\"}[1h])) / (sum by (capacity) (rate(tachyon_job_billable_seconds_total{region=~\"$region\"}[1h])) / 60)",
+          "legendFormat": "{{capacity}}"
+        }
+      ],
+      "id": 25,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 74
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Billable minutes by capacity",
+      "description": "Billable runner minutes per minute (concurrent jobs).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "sum by (capacity) (rate(tachyon_job_billable_seconds_total{region=~\"$region\", vcpu=~\"$vcpu\"}[$__rate_interval]))",
+          "legendFormat": "{{capacity}}"
+        }
+      ],
+      "id": 26,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 74
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Job records waiting for ClickHouse",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tachyon-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "tachyon_job_records_pending",
+          "legendFormat": "pending"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tachyon-prometheus"
+          },
+          "expr": "increase(tachyon_job_records_dropped_total[1h])",
+          "legendFormat": "dropped / h"
+        }
+      ],
+      "id": 27,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 82
+      }
+    }
+  ]
+}

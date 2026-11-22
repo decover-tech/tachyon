@@ -69,6 +69,7 @@ func TestRecordDataRoundTrip(t *testing.T) {
 	r.CacheResult(true)
 	r.CacheResult(false)
 	r.Prebuild, r.Deferrable = true, true
+	r.Region, r.HostLoad, r.Outcome = "us", 1.25, "succeeded"
 	r.MarkPrebuildBuild()
 
 	got := FromData(r.Data())
@@ -78,6 +79,9 @@ func TestRecordDataRoundTrip(t *testing.T) {
 	gd := got.Data()
 	if gd.HostID != "h1" || gd.VCPU != 4 || !gd.Burst || gd.PrebuildMatch != "full" || len(gd.Steps) != 1 || gd.CacheHits != 1 || gd.CacheMisses != 1 {
 		t.Errorf("data = %+v", gd)
+	}
+	if got.Region != "us" || got.HostLoad != 1.25 || got.Outcome != "succeeded" {
+		t.Errorf("observability fields lost: %q %v %q", got.Region, got.HostLoad, got.Outcome)
 	}
 	if !got.Prebuild || !got.Deferrable || !got.IsPrebuildBuild() {
 		t.Errorf("flags lost: prebuild=%v deferrable=%v build=%v", got.Prebuild, got.Deferrable, got.IsPrebuildBuild())

@@ -1,0 +1,322 @@
+{
+  "uid": "tachyon-jobs",
+  "title": "Tachyon job analytics",
+  "description": "Per-job phase records from ClickHouse: pickup, prebuild savings, cache, oversubscription slowdown and cost.",
+  "tags": [
+    "tachyon"
+  ],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "utc",
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Pickup",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Pickup p50 / p95 by region and size",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tachyon-clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tachyon-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT $__timeInterval(runner_online_at) AS time,\n       concat(region, ' ', toString(vcpu), 'x') AS series,\n       quantile(0.5)(pickup_seconds) AS p50,\n       quantile(0.95)(pickup_seconds) AS p95\nFROM tachyon.job_records FINAL\nWHERE $__timeFilter(runner_online_at) AND pickup_seconds IS NOT NULL\nGROUP BY time, series\nORDER BY time"
+        }
+      ],
+      "id": 2,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      }
+    },
+    {
+      "id": 3,
+      "type": "row",
+      "title": "Prebuilds",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Prebuild hit rate by repo",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tachyon-clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tachyon-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT repo,\n       count() AS jobs,\n       countIf(prebuild_match = 'full') / count() AS full,\n       countIf(prebuild_match = 'partial') / count() AS partial,\n       countIf(prebuild_match = 'none') / count() AS none,\n       quantileIf(0.5)(run_seconds, prebuild_match = 'none') AS median_run_s_cold,\n       quantileIf(0.5)(run_seconds, prebuild_match = 'full') AS median_run_s_warm\nFROM tachyon.job_records FINAL\nWHERE $__timeFilter(job_finished_at)\nGROUP BY repo\nORDER BY jobs DESC\nLIMIT 100"
+        }
+      ],
+      "id": 4,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Minutes saved by prebuilds",
+      "description": "Per repo and size: median cold run time minus each warm job's run time.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tachyon-clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tachyon-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "WITH cold AS (\n    SELECT repo, vcpu, quantile(0.5)(run_seconds) AS cold_s\n    FROM tachyon.job_records FINAL\n    WHERE prebuild_match = 'none' AND run_seconds IS NOT NULL AND $__timeFilter(job_finished_at)\n    GROUP BY repo, vcpu\n)\nSELECT $__timeInterval(j.job_finished_at) AS time,\n       sum(greatest(c.cold_s - j.run_seconds, 0)) / 60 AS minutes_saved\nFROM tachyon.job_records AS j FINAL\nINNER JOIN cold AS c USING (repo, vcpu)\nWHERE j.prebuild_match IN ('full', 'partial') AND $__timeFilter(j.job_finished_at)\nGROUP BY time\nORDER BY time"
+        }
+      ],
+      "id": 5,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      }
+    },
+    {
+      "type": "table",
+      "title": "Cache hit rate by repo",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tachyon-clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tachyon-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT repo,\n       sum(cache_hits) AS hits,\n       sum(cache_misses) AS misses,\n       hits / nullIf(hits + misses, 0) AS hit_rate\nFROM tachyon.job_records FINAL\nWHERE $__timeFilter(job_finished_at)\nGROUP BY repo\nORDER BY hits + misses DESC\nLIMIT 50"
+        }
+      ],
+      "id": 6,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      }
+    },
+    {
+      "id": 7,
+      "type": "row",
+      "title": "Oversubscription",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 26
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Oversubscription slowdown (normalized per repo and size)",
+      "description": "Each oversubscribed job's run time over its repo's median on a non-oversubscribed host. The scheduler steps back above 1.10.",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tachyon-clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tachyon-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "WITH base AS (\n    SELECT repo, vcpu, quantile(0.5)(run_seconds) AS med\n    FROM tachyon.job_records FINAL\n    WHERE host_load <= 1 AND run_seconds IS NOT NULL AND $__timeFilter(job_finished_at)\n    GROUP BY repo, vcpu\n)\nSELECT $__timeInterval(j.job_finished_at) AS time,\n       quantile(0.5)(j.run_seconds / b.med) AS median_slowdown,\n       quantile(0.9)(j.run_seconds / b.med) AS p90_slowdown\nFROM tachyon.job_records AS j FINAL\nINNER JOIN base AS b USING (repo, vcpu)\nWHERE j.host_load > 1 AND j.run_seconds IS NOT NULL AND b.med > 0 AND $__timeFilter(j.job_finished_at)\nGROUP BY time\nORDER BY time"
+        }
+      ],
+      "id": 8,
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 27
+      }
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Cost",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 35
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Cost per job-minute, owned vs burst",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tachyon-clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tachyon-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 0,
+          "queryType": "timeseries",
+          "rawSql": "SELECT $__timeInterval(job_finished_at) AS time,\n       capacity,\n       sum(cost_usd) / nullIf(sum(billable_seconds) / 60, 0) AS usd_per_job_minute\nFROM tachyon.job_records FINAL\nWHERE $__timeFilter(job_finished_at) AND billable_seconds IS NOT NULL\nGROUP BY time, capacity\nORDER BY time"
+        }
+      ],
+      "id": 10,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 36
+      }
+    },
+    {
+      "type": "table",
+      "title": "Billable minutes and cost by tenant",
+      "description": "",
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "tachyon-clickhouse"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "tachyon-clickhouse"
+          },
+          "editorType": "sql",
+          "format": 1,
+          "queryType": "table",
+          "rawSql": "SELECT tenant,\n       count() AS jobs,\n       sum(billable_seconds) / 60 AS billable_minutes,\n       sum(cost_usd) AS cost_usd,\n       countIf(outcome = 'infra_error') AS infra_errors\nFROM tachyon.job_records FINAL\nWHERE $__timeFilter(job_finished_at)\nGROUP BY tenant\nORDER BY billable_minutes DESC"
+        }
+      ],
+      "id": 11,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 36
+      }
+    }
+  ]
+}

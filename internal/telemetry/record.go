@@ -33,6 +33,11 @@ type Record struct {
 	// Deferrable jobs ran in the discounted off-peak class. Their pickup
 	// includes time spent deferred, so fleet pickup SLOs exclude them.
 	Deferrable bool
+	Region     string
+	// HostLoad is the host's reserved CPU over physical vCPUs right after
+	// this job was placed; above 1 the job ran oversubscribed.
+	HostLoad float64
+	Outcome  string // succeeded | failed | infra_error | cancelled
 
 	mu        sync.Mutex
 	phases    map[Phase]time.Time
@@ -108,6 +113,9 @@ type RecordData struct {
 	Prebuild      bool                `json:"prebuild,omitempty"`
 	PrebuildBuild bool                `json:"prebuild_build,omitempty"`
 	Deferrable    bool                `json:"deferrable,omitempty"`
+	Region        string              `json:"region,omitempty"`
+	HostLoad      float64             `json:"host_load,omitempty"`
+	Outcome       string              `json:"outcome,omitempty"`
 	Phases        map[Phase]time.Time `json:"phases"`
 	Steps         []Step              `json:"steps,omitempty"`
 	CacheHits     int                 `json:"cache_hits"`
@@ -122,6 +130,7 @@ func (r *Record) Data() RecordData {
 		JobID: r.JobID, Tenant: r.Tenant, Repo: r.Repo, HostID: r.HostID, VCPU: r.VCPU,
 		PrebuildMatch: r.PrebuildMatch, Burst: r.Burst,
 		Prebuild: r.Prebuild, PrebuildBuild: r.prebuildBuild, Deferrable: r.Deferrable,
+		Region: r.Region, HostLoad: r.HostLoad, Outcome: r.Outcome,
 		Phases:    make(map[Phase]time.Time, len(r.phases)),
 		Steps:     append([]Step(nil), r.steps...),
 		CacheHits: r.cacheHits, CacheMisses: r.cacheMiss,
@@ -138,6 +147,7 @@ func FromData(d RecordData) *Record {
 	r.Tenant, r.Repo, r.HostID, r.VCPU = d.Tenant, d.Repo, d.HostID, d.VCPU
 	r.PrebuildMatch, r.Burst = d.PrebuildMatch, d.Burst
 	r.Prebuild, r.prebuildBuild, r.Deferrable = d.Prebuild, d.PrebuildBuild, d.Deferrable
+	r.Region, r.HostLoad, r.Outcome = d.Region, d.HostLoad, d.Outcome
 	for p, t := range d.Phases {
 		r.phases[p] = t
 	}

@@ -102,6 +102,11 @@ type Core struct {
 	// Results, if set, receives every job result (e.g. the GitHub adapter,
 	// for opt-in re-runs of infrastructure failures).
 	Results jobapi.ResultHandler
+	// Observability (optional): fleet metrics, the per-job record export
+	// (ClickHouse) and the capacity prices used to cost each job.
+	Metrics    *telemetry.Metrics
+	JobRecords JobRecordSink
+	Pricing    telemetry.Pricing
 
 	mu       sync.Mutex
 	pbJobs   map[string]string // prebuild build job ID -> repo (prebuilds.go)
@@ -231,6 +236,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	if len(sub.ChangedFiles) == 0 {
 		sub.ChangedFiles = c.hints[spec.Repo+"@"+spec.Commit].changed
 	}
+	_, resubmitted := c.records[spec.JobID]
 	c.records[spec.JobID] = rec
 	c.mu.Unlock()
 	handedOff := false
@@ -247,6 +253,10 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		return fmt.Errorf("persist job %s: %w", spec.JobID, err)
 	}
 	defer c.saveRecord(ctx, rec)
+	if !resubmitted {
+		c.Metrics.JobQueued(ctx, sub.Region, spec.Hardware.VCPU)
+	}
+	rec.Region = sub.Region
 
 	place := c.Scheduler.Place
 	if overdue {
@@ -281,6 +291,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		if err := c.Burst.Submit(ctx, sub); err != nil {
 			return err
 		}
+		c.Metrics.JobBurst(ctx, sub.Region, spec.Hardware.VCPU)
 		c.offPeakStarted(sub, overdue)
 		return nil
 	case err != nil:
@@ -288,6 +299,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		return err
 	}
 	rec.HostID = a.HostID
+	rec.HostLoad = c.Scheduler.Load(a.HostID)
 	rec.Mark(telemetry.HostAssigned, c.now())
 	ir, rolling := c.Images.(ImageRollout)
 	if rolling {
@@ -316,6 +328,7 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return fmt.Errorf("host %s not connected", a.HostID)
 	}
+	rec.Region = hc.region
 	// Recorded before sending: after a restart the reservation is restored
 	// and released by the host's result.
 	c.noteJob(ctx, sub, store.JobAssigned, &a)
