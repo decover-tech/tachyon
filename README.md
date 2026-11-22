@@ -29,6 +29,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `images/ubuntu-24.04/` | – | `image.yml` (pinned runner-images commit, trims) and `build.sh` (Linux builder: ext4 image, SBOM, unsigned manifest); rebuilt weekly by `.github/workflows/base-image.yml`, which signs the manifest in a separate job that never runs build code |
 | `internal/telemetry/` | Go | Per-job phase timeline: pickup latency, billable seconds |
 | `internal/billing/` | Go | Metering from the telemetry record: per-second runner time by VM size, per-repo prebuild allowance, storage above quota per GB-month |
+| `internal/secrets/` | Go | Key store for JIT configs and tokens (Vault/OpenBao KV v2, or in-memory for dev): `secret://` refs, short TTLs, redaction ([0002-key-store.md](docs/decisions/0002-key-store.md)) |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
 | `examples/node-go/` | – | A repo config and workflow using Tachyon |
 | `gen/` | Go | Generated from `proto/` by `buf generate`; checked in |
@@ -77,11 +78,14 @@ Paging uses the `CACHE_CONTRACT_OWNERS` repository variable (the team to mention
 ### Running the control plane
 
 ```sh
-TACHYON_GITHUB_WEBHOOK_SECRET=... bin/tachyon-controlplane \
+TACHYON_GITHUB_WEBHOOK_SECRET=... TACHYON_VAULT_TOKEN=... bin/tachyon-controlplane \
   -github-app-id 123 -github-app-key app.pem \
   -image ubuntu-24.04=2026-11-16 \
-  -hostlink-cert cp.crt -hostlink-key cp.key -hostlink-client-ca hostlink-ca.crt
+  -hostlink-cert cp.crt -hostlink-key cp.key -hostlink-client-ca hostlink-ca.crt \
+  -vault-addr https://vault.internal:8200
 ```
+
+JIT runner configs are kept in a Vault or OpenBao KV v2 engine (`-vault-mount secret`, `-vault-prefix tachyon`, `-jit-ttl 10m`); use `-vault-token-file` instead of `TACHYON_VAULT_TOKEN` when a Vault Agent rotates the token. For local development without Vault, pass `-secrets mem`.
 
 Webhooks go to `POST /webhooks/github` on `:8080`. hostd connects to gRPC on `:9090` over mutual TLS, and each host must present a certificate for its own `TACHYON_HOST_ID`. `tachyon hostcert` issues development certificates; issuance and rotation are in [docs/hostlink-mtls.md](docs/hostlink-mtls.md). Pass `-hostlink-insecure` (and `TACHYON_HOSTLINK_INSECURE=1` to hostd) to run without TLS locally.
 

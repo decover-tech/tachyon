@@ -30,6 +30,7 @@ import (
 	"github.com/decover-tech/tachyon/internal/images"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/scheduler"
+	"github.com/decover-tech/tachyon/internal/secrets"
 	"github.com/decover-tech/tachyon/internal/store/postgres"
 	"github.com/decover-tech/tachyon/internal/telemetry"
 )
@@ -53,6 +54,14 @@ func main() {
 	clientCA := flag.String("hostlink-client-ca", "", "CA bundle that host client certificates must chain to (PEM)")
 	trustDomain := flag.String("hostlink-trust-domain", hostauth.DefaultTrustDomain, "SPIFFE trust domain of host identities")
 	insecureLink := flag.Bool("hostlink-insecure", false, "serve hostlink without mTLS or host authentication (local development only)")
+	keyStore := secrets.Config{}
+	flag.StringVar(&keyStore.Backend, "secrets", "vault", "key store for JIT configs and tokens: vault or mem (development only)")
+	flag.StringVar(&keyStore.VaultAddr, "vault-addr", os.Getenv("VAULT_ADDR"), "Vault/OpenBao address")
+	flag.StringVar(&keyStore.VaultMount, "vault-mount", "secret", "KV v2 mount")
+	flag.StringVar(&keyStore.VaultPrefix, "vault-prefix", "tachyon", "key prefix under the mount")
+	flag.StringVar(&keyStore.VaultNamespace, "vault-namespace", os.Getenv("VAULT_NAMESPACE"), "Vault namespace (optional)")
+	flag.StringVar(&keyStore.VaultTokenFile, "vault-token-file", "", "file holding the Vault token, re-read per request (default: $TACHYON_VAULT_TOKEN)")
+	flag.DurationVar(&keyStore.JITTTL, "jit-ttl", secrets.DefaultJITTTL, "TTL of stored JIT runner configs")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -93,7 +102,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	secrets := &controlplane.MemSecrets{}
+	keyStore.VaultToken = secrets.Redacted(os.Getenv("TACHYON_VAULT_TOKEN"))
+	keys, err := secrets.Open(keyStore)
+	if err != nil {
+		log.Error("key store", "err", err)
+		os.Exit(2)
+	}
+	if keyStore.Backend == "mem" {
+		log.Warn("secrets kept in process memory; use -secrets=vault in production")
+	}
 	var prebuilds controlplane.Prebuilds = &controlplane.MemPrebuilds{}
 	var db *postgres.Store
 	if dsn := os.Getenv("TACHYON_DATABASE_URL"); dsn != "" {
@@ -113,7 +130,7 @@ func main() {
 		Scheduler: scheduler.New(nil),
 		Images:    pins,
 		Prebuilds: prebuilds,
-		Secrets:   secrets,
+		Secrets:   keys,
 		Mirrors:   mirrors.Endpoints{NPM: *npmMirror, GoProxy: *goMirror, Registry: *registryMirror},
 		CacheURL:  *cacheURL,
 		Log:       log,
@@ -124,7 +141,7 @@ func main() {
 	adapter := &github.Adapter{
 		WebhookSecret: []byte(secret),
 		API:           &github.Client{AppID: *appID, PrivateKey: key},
-		Secrets:       secrets,
+		Secrets:       keys,
 		Log:           log,
 	}
 	if db != nil {
@@ -186,6 +203,9 @@ func main() {
 					}
 				}
 				core.ReconcileReplicas()
+				if m, ok := keys.(*secrets.Mem); ok {
+					m.Sweep()
+				}
 			case <-report.C:
 				r := core.OffPeak.Report()
 				log.Info("off-peak class", "window", r.Window, "avg_util", r.AvgUtil, "base_util", r.AvgBaseUtil,
