@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,6 +27,8 @@ type fakeStream struct {
 	in      chan *hostlinkv1.LinkRequest
 	out     chan *hostlinkv1.LinkResponse
 	waiting chan struct{}
+	// disconnect closes the stream and waits for Link to return.
+	disconnect func()
 }
 
 func (s *fakeStream) Context() context.Context { return s.ctx }
@@ -102,6 +105,15 @@ func newEnv() *env {
 // connect opens a host stream and sends Hello.
 func (e *env) connect(t *testing.T, id, region string, vcpu, mem uint32) *fakeStream {
 	t.Helper()
+	return e.connectHello(t, &hostlinkv1.Hello{
+		HostId: id, Region: region, FailureDomain: id, Arch: "x86_64", Vcpu: vcpu, MemoryGb: mem,
+		PeerAddress: "http://" + id + ":7443",
+	})
+}
+
+// connectHello opens a host stream and sends hello.
+func (e *env) connectHello(t *testing.T, hello *hostlinkv1.Hello) *fakeStream {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &fakeStream{
 		ctx:     ctx,
@@ -112,13 +124,15 @@ func (e *env) connect(t *testing.T, id, region string, vcpu, mem uint32) *fakeSt
 	done := make(chan error, 1)
 	go func() { done <- e.link.Link(s) }()
 	<-s.waiting // first Recv
-	s.push(t, &hostlinkv1.LinkRequest{Msg: &hostlinkv1.LinkRequest_Hello{Hello: &hostlinkv1.Hello{
-		HostId: id, Region: region, FailureDomain: id, Arch: "x86_64", Vcpu: vcpu, MemoryGb: mem,
-	}}})
-	t.Cleanup(func() {
-		cancel()
-		<-done
-	})
+	s.push(t, &hostlinkv1.LinkRequest{Msg: &hostlinkv1.LinkRequest_Hello{Hello: hello}})
+	var once sync.Once
+	s.disconnect = func() {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+	}
+	t.Cleanup(s.disconnect)
 	return s
 }
 
@@ -220,8 +234,12 @@ func TestSubmitPartialWhenKeyFileChanged(t *testing.T) {
 	if err := e.core.Hint(context.Background(), jobapi.Hint{Repo: "github.com/acme/api", Commit: "abc", ChangedFiles: []string{"go.sum"}}); err != nil {
 		t.Fatal(err)
 	}
-	if pf := s.next(t).GetPreFork(); pf == nil || pf.GetPrebuildSnapshotId() != "snap" || pf.GetRepo() != "acme/api" {
+	pf := s.next(t).GetPreFork()
+	if pf == nil || pf.GetPrebuildSnapshotId() != "snap" || pf.GetRepo() != "acme/api" || pf.GetCommit() != "abc" {
 		t.Fatalf("expected PreFork, got %v", pf)
+	}
+	if ttl := time.Until(pf.GetExpiresAt().AsTime()); ttl <= 0 || ttl > preForkTTL {
+		t.Errorf("pre-fork expires in %v, want within %v", ttl, preForkTTL)
 	}
 	if err := e.core.Submit(context.Background(), e.submission(t, "j1", 2)); err != nil {
 		t.Fatal(err)
@@ -246,7 +264,8 @@ func TestSubmitFallsBackWhenHostLacksPrebuild(t *testing.T) {
 	// h1 is asked to pull the prebuild from its regional peer, then runs the
 	// job from the base image.
 	pull := h1.next(t).GetPullSnapshot()
-	if pull == nil || pull.GetFromHostId() != "h2" || pull.GetSnapshot().GetId() != "h2-snap" {
+	if pull == nil || pull.GetFromHostId() != "h2" || pull.GetSnapshot().GetId() != "h2-snap" ||
+		pull.GetFromAddress() != "http://h2:7443" || pull.GetToken() == "" {
 		t.Fatalf("expected PullSnapshot from h2, got %v", pull)
 	}
 	a := h1.next(t).GetAssign()
@@ -255,6 +274,11 @@ func TestSubmitFallsBackWhenHostLacksPrebuild(t *testing.T) {
 	}
 	if _, ok := a.GetGuest().GetEnv()["TACHYON_WARM_PATHS"]; ok {
 		t.Error("warm paths set for a base-image fork")
+	}
+	// h2 is granted exactly that pull.
+	g := h2.next(t).GetServeSnapshot()
+	if g == nil || g.GetToken() != pull.GetToken() || g.GetToHostId() != "h1" || g.GetSnapshotId() != "h2-snap" {
+		t.Fatalf("grant = %v", g)
 	}
 	h2.none(t)
 }
@@ -309,6 +333,28 @@ func TestJobResultReleasesAndRegistersPrebuild(t *testing.T) {
 	}
 	if n := len(e.core.Records()); n != 3 {
 		t.Errorf("Records() = %d, want 3", n)
+	}
+}
+
+func TestJobResultFeedsDurationToProfile(t *testing.T) {
+	e := newEnv()
+	profiles := &scheduler.Profiles{MinSamples: 1}
+	e.core.Scheduler = scheduler.New(profiles)
+	s := e.connect(t, "h1", "us", 4, 16)
+	s.push(t, heartbeat(false))
+
+	if err := e.core.Submit(context.Background(), e.submission(t, "j1", 4)); err != nil {
+		t.Fatal(err)
+	}
+	s.next(t)
+	start := time.Now()
+	e.core.Record("j1").Mark(telemetry.VMResumed, start)
+	e.core.Record("j1").Mark(telemetry.JobFinished, start.Add(3*time.Minute))
+	s.push(t, &hostlinkv1.LinkRequest{Msg: &hostlinkv1.LinkRequest_JobResult{JobResult: &hostlinkv1.JobResult{
+		JobId: "j1", Outcome: hostlinkv1.JobResult_OUTCOME_SUCCEEDED, AvgBusyVcpu: 1, PeakMemoryGb: 2,
+	}}})
+	if prof, ok := profiles.Get("acme/api/CI/test"); !ok || prof.P95Duration != 3*time.Minute {
+		t.Fatalf("profile = %+v ok=%v", prof, ok)
 	}
 }
 
@@ -389,4 +435,39 @@ func TestAssignAlwaysHasDockerVolume(t *testing.T) {
 	if len(v) != 1 || v[0].GetKey() != "docker" || v[0].GetMount() != "/var/lib/docker" {
 		t.Errorf("volumes = %v", v)
 	}
+}
+
+func TestSequencedMessagesAreAckedAndReplaysAreIdempotent(t *testing.T) {
+	e := newEnv()
+	s := e.connect(t, "h1", "us", 4, 16)
+	s.push(t, heartbeat(false))
+	if err := e.core.Submit(context.Background(), e.submission(t, "j1", 4)); err != nil {
+		t.Fatal(err)
+	}
+	s.next(t) // assign
+
+	result := &hostlinkv1.LinkRequest{Seq: 7, Msg: &hostlinkv1.LinkRequest_JobResult{JobResult: &hostlinkv1.JobResult{
+		JobId: "j1", Outcome: hostlinkv1.JobResult_OUTCOME_SUCCEEDED,
+	}}}
+	s.push(t, result)
+	if a := s.next(t).GetAck(); a == nil || a.GetSeq() != 7 {
+		t.Fatalf("want ack 7, got %v", a)
+	}
+	// hostd resends unacked messages after a reconnect; a duplicate result
+	// must not release capacity twice.
+	s.push(t, result)
+	if a := s.next(t).GetAck(); a == nil || a.GetSeq() != 7 {
+		t.Fatalf("want ack 7 again, got %v", a)
+	}
+	if err := e.core.Submit(context.Background(), e.submission(t, "j2", 4)); err != nil {
+		t.Fatal(err)
+	}
+	s.next(t) // assign j2
+	if err := e.core.Submit(context.Background(), e.submission(t, "j3", 4)); !errors.Is(err, scheduler.ErrNoCapacity) {
+		t.Fatalf("duplicate result released capacity twice: %v", err)
+	}
+
+	// Unsequenced messages (older hosts) get no ack.
+	s.push(t, heartbeat(false))
+	s.none(t)
 }

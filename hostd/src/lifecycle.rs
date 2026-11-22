@@ -21,10 +21,12 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use crate::hypervisor::{GuestDisk, GuestPayload, GuestPrebuild, GuestStop, Hypervisor};
+use crate::network::EgressPolicy;
 use crate::pb;
+use crate::prefork::PreForks;
 use crate::rootfs;
 use crate::storage::{self, Storage};
 
@@ -60,6 +62,8 @@ pub struct Agent<H: Hypervisor, S: Storage> {
     pub cancel_grace: Duration,
     pool: Mutex<HashMap<u32, Vec<H::Vm>>>,
     jobs: Mutex<HashMap<String, CancelSlot>>,
+    /// Job disks forked ahead of assignment from push/PR hints.
+    pub(crate) pre_forks: PreForks,
 }
 
 impl<H: Hypervisor, S: Storage> Agent<H, S> {
@@ -71,6 +75,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             cancel_grace: CANCEL_GRACE,
             pool: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
+            pre_forks: PreForks::default(),
         }
     }
 
@@ -208,15 +213,22 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         // never on the overlay.
         let volumes = rootfs::plan_volumes(&job.volumes)?;
 
-        // Job disk: copy-on-write fork of the prebuild, or an empty disk.
-        let job_disk = storage::job_disk(&job.job_id);
-        if job.prebuild_snapshot_id.is_empty() {
-            self.storage.create_empty(&job_disk, EMPTY_DISK_GB)?;
+        // Job disk: a disk pre-forked for this repo/commit if one is held,
+        // else a copy-on-write fork of the prebuild, or an empty disk.
+        let job_disk = if let Some(d) = self.take_pre_fork(job, SystemTime::now()) {
+            tracing::info!(job = %job.job_id, disk = %d, "using pre-forked disk");
+            d
         } else {
-            self.storage
-                .clone_snapshot(&job.prebuild_snapshot_id, &job_disk)
-                .context("fork prebuild")?;
-        }
+            let d = storage::job_disk(&job.job_id);
+            if job.prebuild_snapshot_id.is_empty() {
+                self.storage.create_empty(&d, EMPTY_DISK_GB)?;
+            } else {
+                self.storage
+                    .clone_snapshot(&job.prebuild_snapshot_id, &d)
+                    .context("fork prebuild")?;
+            }
+            d
+        };
         disks.push(job_disk.clone());
 
         // Sticky volumes: clone-then-promote, so two jobs never write the
@@ -242,6 +254,9 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         let mut vm = self.take_vm(job.vcpu, job.memory_gb)?;
         let run = (|| -> Result<pb::job_result::Outcome> {
             self.hv.set_cpu_weight(&mut vm, job.cpu_weight.max(1))?;
+            self.hv
+                .set_egress(&mut vm, &EgressPolicy::for_job(job))
+                .context("apply egress policy")?;
             self.hv.resume(&mut vm)?;
             events(pb::Phase::VmResumed);
 
@@ -282,6 +297,9 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                     warm_commands: b.warm_commands.clone(),
                     keep_paths: b.keep_paths.clone(),
                     scrub_paths: b.scrub_paths.clone(),
+                    clone_commands: b.clone_commands.clone(),
+                    clone_token_b64: base64_encode(&b.clone_token),
+                    refresh: b.refresh,
                 });
             }
             // Don't hand the runner its config if the job is already
@@ -339,12 +357,14 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                 .storage
                 .snapshot(&job_disk, &storage::sanitize(&b.key))?;
             disks.retain(|d| d != &job_disk);
-            result.prebuild = Some(pb::SnapshotRef {
+            let r = pb::SnapshotRef {
                 kind: pb::snapshot_ref::Kind::Prebuild as i32,
                 repo: job.repo.clone(),
                 key: b.key.clone(),
                 id: snap,
-            });
+            };
+            crate::recovery::label_snapshot(&self.storage, &r);
+            result.prebuild = Some(r);
         }
         if trusted {
             for (v, clone) in &sticky {
@@ -352,12 +372,14 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                     .storage
                     .snapshot(clone, &format!("head-{}", storage::sanitize(&job.job_id)))?;
                 disks.retain(|d| d != clone);
-                result.promoted.push(pb::SnapshotRef {
+                let r = pb::SnapshotRef {
                     kind: pb::snapshot_ref::Kind::Sticky as i32,
                     repo: job.repo.clone(),
                     key: v.key.clone(),
                     id: snap,
-                });
+                };
+                crate::recovery::label_snapshot(&self.storage, &r);
+                result.promoted.push(r);
             }
         }
         Ok(())
@@ -424,6 +446,10 @@ mod tests {
         assert_eq!(r.promoted.len(), 1);
         assert_eq!(r.promoted[0].id, "jobs/gh_1-docker@head-gh_1");
         assert!(a.storage.has("jobs/gh_1-docker"), "promoted clone kept");
+        assert_eq!(
+            a.storage.labels.lock().unwrap()["jobs/gh_1-docker@head-gh_1"]["kind"],
+            "sticky"
+        );
         assert!(!a.storage.has("jobs/gh_1"), "job disk discarded");
         assert_eq!(r.avg_busy_vcpu, 1.5);
         assert_eq!(
@@ -527,6 +553,39 @@ mod tests {
         assert_eq!(pb.repo, "acme/api");
         assert_eq!(r.base_image, "ubuntu-24.04@2026-11-16");
         assert!(a.storage.has("jobs/gh_1"));
+        assert_eq!(
+            a.storage.labels.lock().unwrap()["jobs/gh_1@pb1-abc"]["repo"],
+            "acme/api",
+            "kept snapshots are labeled for restart recovery"
+        );
+    }
+
+    #[test]
+    fn prebuild_build_passes_clone_to_guest() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        let mut j = job(pb::Trust::Trusted);
+        j.guest.as_mut().unwrap().runner_config.clear();
+        j.prebuild_build = Some(pb::PrebuildBuild {
+            key: "pb1-abc".into(),
+            warm_commands: vec!["npm ci".into()],
+            clone_commands: vec!["git init -q .".into()],
+            clone_token: b"ghs_secret".to_vec(),
+            refresh: true,
+            ..Default::default()
+        });
+        let r = a.run_job(&j, &|_| {});
+        assert_eq!(r.outcome(), Outcome::Succeeded, "{}", r.error);
+        let payloads = a.hv.payloads.lock().unwrap();
+        let p = payloads[0].prebuild.as_ref().unwrap();
+        assert_eq!(p.clone_commands, vec!["git init -q .".to_string()]);
+        assert_eq!(p.clone_token_b64, base64_encode(b"ghs_secret"));
+        assert!(p.refresh);
+        assert!(
+            !payloads[0].env.values().any(|v| v.contains("ghs_secret")),
+            "clone token leaked into the guest env"
+        );
+        let shown = format!("{p:?}");
+        assert!(!shown.contains("ghs_secret") && !shown.contains(&p.clone_token_b64));
     }
 
     #[test]
@@ -686,6 +745,32 @@ mod tests {
             .unwrap()
             .iter()
             .all(|l| !l.starts_with("clone") && !l.starts_with("create")));
+    }
+
+    #[test]
+    fn egress_policy_set_before_resume() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        a.run_job(&job(pb::Trust::Untrusted), &|_| {});
+        let mut j = job(pb::Trust::Trusted);
+        j.prebuild_build = Some(pb::PrebuildBuild {
+            key: "k".into(),
+            egress_allowlist: vec!["github.com:443".into()],
+            ..Default::default()
+        });
+        a.run_job(&j, &|_| {});
+        let got = a.hv.egress.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            vec![
+                (EgressPolicy::Open, false),
+                (
+                    EgressPolicy::Restricted {
+                        allow: vec!["github.com:443".into()]
+                    },
+                    false
+                ),
+            ]
+        );
     }
 
     #[test]

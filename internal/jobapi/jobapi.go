@@ -154,6 +154,12 @@ type Spec struct {
 	Volumes   []Volume    `yaml:"volumes" json:"volumes"`
 	Bootstrap Bootstrap   `yaml:"bootstrap" json:"bootstrap"`
 	Trust     Trust       `yaml:"trust" json:"trust"`
+	// Git refs that scope the job's Actions cache entries. Optional: a job
+	// without them gets a cache scope of its own. Ref is refs/heads/<b> or,
+	// for pull requests, refs/pull/<n>/merge with BaseRef the target branch.
+	Ref           string `yaml:"ref,omitempty" json:"ref,omitempty"`
+	BaseRef       string `yaml:"base_ref,omitempty" json:"base_ref,omitempty"`
+	DefaultBranch string `yaml:"default_branch,omitempty" json:"default_branch,omitempty"` // refs/heads/main
 }
 
 // Validate checks the fields the core relies on.
@@ -198,10 +204,13 @@ type Submission struct {
 // Hint is an early signal (push, pull request) that jobs for this commit are
 // likely coming, so the scheduler can pre-fork a job disk before `queued`.
 type Hint struct {
-	Tenant       string
-	Repo         string
-	Commit       string
-	Ref          string
+	Tenant string
+	Repo   string
+	Commit string
+	Ref    string
+	// Event is what produced the hint: "push" or "pull_request". Only
+	// pushes can trigger prebuilds.
+	Event        string
 	ChangedFiles []string
 	Trust        Trust
 	ReceivedAt   time.Time
@@ -218,4 +227,28 @@ type Frontend interface {
 	Name() string
 	// Handler serves the platform's webhooks and forwards work to core.
 	Handler(core Core) http.Handler
+}
+
+// Outcome is how a job ended, as reported by the host that ran it.
+type Outcome string
+
+const (
+	OutcomeSucceeded Outcome = "succeeded"
+	OutcomeFailed    Outcome = "failed"      // the job's own failure
+	OutcomeInfra     Outcome = "infra_error" // Tachyon's failure; eligible for opt-in re-run
+	OutcomeCancelled Outcome = "cancelled"
+)
+
+// Result is the end of one job, passed back to the frontend that submitted it.
+type Result struct {
+	JobID   string
+	Outcome Outcome
+	Error   string
+}
+
+// ResultHandler is implemented by frontends that act on job results, such
+// as re-running jobs that failed for infrastructure reasons. It must not
+// block: the core calls it from the host link.
+type ResultHandler interface {
+	OnResult(ctx context.Context, r Result)
 }

@@ -82,8 +82,14 @@ func TestGitConfig(t *testing.T) {
 
 func TestOtherConfigs(t *testing.T) {
 	e := Endpoints{Apt: "http://apt.m:3142", Maven: "https://maven.m"}
-	if got := e.AptConf(); got != "Acquire::http::Proxy \"http://apt.m:3142\";\n" {
-		t.Errorf("AptConf = %q", got)
+	apt := e.AptConf()
+	if !strings.Contains(apt, "Acquire::http::Proxy::archive.ubuntu.com \"http://apt.m:3142\";\n") ||
+		!strings.Contains(apt, "Acquire::http::Proxy::deb.debian.org \"http://apt.m:3142\";\n") {
+		t.Errorf("AptConf = %q", apt)
+	}
+	// Never a global proxy: private apt repos must not go through the mirror.
+	if strings.Contains(apt, "Acquire::http::Proxy \"") || strings.Contains(apt, "::.") {
+		t.Errorf("AptConf sets a global or wildcard proxy: %q", apt)
 	}
 	if !strings.Contains(e.GradleInit(), `"https://maven.m"`) {
 		t.Errorf("GradleInit = %s", e.GradleInit())

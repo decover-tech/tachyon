@@ -4,8 +4,8 @@
 // This file holds the scoping and quota rules, which copy GitHub's: entries
 // from the default branch are readable by every branch, pull-request entries
 // stay with that pull request, and forks can read but never write. The
-// protocol server (a Twirp API handing out signed blob URLs, as of mid-2026)
-// and the object store behind it (decision D4) are not built yet.
+// protocol server is in server.go; the object store behind it (decision D4)
+// is the BlobStore interface in store.go.
 package cache
 
 import (
@@ -56,14 +56,31 @@ type Entry struct {
 
 // Index is an in-memory cache index with per-repo quotas and LRU eviction.
 type Index struct {
-	// QuotaBytes per repo; larger than GitHub's default 10 GB.
+	// QuotaBytes per repo; larger than GitHub's default 10 GB. Zero means
+	// no quota.
 	QuotaBytes int64
+	// RepoQuota, if set, overrides QuotaBytes for one repo when it returns
+	// a positive value.
+	RepoQuota func(repo string) int64
 	// OnEvict is called for evicted entries so their blobs can be deleted.
 	OnEvict func(Entry)
 	Now     func() time.Time
 
 	mu      sync.Mutex
 	entries map[string][]*Entry // repo -> entries
+}
+
+// DefaultQuotaBytes is the per-repo quota when none is configured: five
+// times GitHub's 10 GB default.
+const DefaultQuotaBytes int64 = 50 << 30
+
+func (ix *Index) quota(repo string) int64 {
+	if ix.RepoQuota != nil {
+		if q := ix.RepoQuota(repo); q > 0 {
+			return q
+		}
+	}
+	return ix.QuotaBytes
 }
 
 func (ix *Index) now() time.Time {
@@ -114,7 +131,7 @@ func (ix *Index) Put(s Scope, e Entry) error {
 		return ErrForkWrite
 	}
 	e.Repo, e.Ref = s.Repo, s.Ref
-	if ix.QuotaBytes > 0 && e.SizeBytes > ix.QuotaBytes {
+	if q := ix.quota(e.Repo); q > 0 && e.SizeBytes > q {
 		return fmt.Errorf("entry of %d bytes exceeds repo quota", e.SizeBytes)
 	}
 	ix.mu.Lock()
@@ -135,7 +152,8 @@ func (ix *Index) Put(s Scope, e Entry) error {
 }
 
 func (ix *Index) evictLocked(repo string) {
-	if ix.QuotaBytes <= 0 {
+	quota := ix.quota(repo)
+	if quota <= 0 {
 		return
 	}
 	es := ix.entries[repo]
@@ -143,11 +161,11 @@ func (ix *Index) evictLocked(repo string) {
 	for _, e := range es {
 		total += e.SizeBytes
 	}
-	if total <= ix.QuotaBytes {
+	if total <= quota {
 		return
 	}
 	sort.Slice(es, func(i, j int) bool { return es[i].LastUsed.Before(es[j].LastUsed) })
-	for len(es) > 0 && total > ix.QuotaBytes {
+	for len(es) > 0 && total > quota {
 		victim := es[0]
 		es = es[1:]
 		total -= victim.SizeBytes
@@ -167,4 +185,18 @@ func (ix *Index) Usage(repo string) int64 {
 		total += e.SizeBytes
 	}
 	return total
+}
+
+// Has reports whether s's own ref already holds key at version. The server
+// checks it before reserving an upload, so a duplicate is refused before any
+// bytes move.
+func (ix *Index) Has(s Scope, version, key string) bool {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	for _, e := range ix.entries[s.Repo] {
+		if e.Ref == s.Ref && e.Key == key && e.Version == version {
+			return true
+		}
+	}
+	return false
 }

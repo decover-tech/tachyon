@@ -33,6 +33,11 @@ type Record struct {
 	// Deferrable jobs ran in the discounted off-peak class. Their pickup
 	// includes time spent deferred, so fleet pickup SLOs exclude them.
 	Deferrable bool
+	Region     string
+	// HostLoad is the host's reserved CPU over physical vCPUs right after
+	// this job was placed; above 1 the job ran oversubscribed.
+	HostLoad float64
+	Outcome  string // succeeded | failed | infra_error | cancelled
 
 	mu        sync.Mutex
 	phases    map[Phase]time.Time
@@ -95,6 +100,61 @@ func (r *Record) between(a, b Phase) (time.Duration, bool) {
 
 // Pickup is webhook received to runner online (target p50 < 2s, p95 < 5s).
 func (r *Record) Pickup() (time.Duration, bool) { return r.between(WebhookReceived, RunnerOnline) }
+
+// RecordData is a Record's serializable form, for persistence.
+type RecordData struct {
+	JobID         string              `json:"job_id"`
+	Tenant        string              `json:"tenant"`
+	Repo          string              `json:"repo"`
+	HostID        string              `json:"host_id"`
+	VCPU          int                 `json:"vcpu"`
+	PrebuildMatch string              `json:"prebuild_match"`
+	Burst         bool                `json:"burst"`
+	Prebuild      bool                `json:"prebuild,omitempty"`
+	PrebuildBuild bool                `json:"prebuild_build,omitempty"`
+	Deferrable    bool                `json:"deferrable,omitempty"`
+	Region        string              `json:"region,omitempty"`
+	HostLoad      float64             `json:"host_load,omitempty"`
+	Outcome       string              `json:"outcome,omitempty"`
+	Phases        map[Phase]time.Time `json:"phases"`
+	Steps         []Step              `json:"steps,omitempty"`
+	CacheHits     int                 `json:"cache_hits"`
+	CacheMisses   int                 `json:"cache_misses"`
+}
+
+// Data returns a copy of the record's contents.
+func (r *Record) Data() RecordData {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d := RecordData{
+		JobID: r.JobID, Tenant: r.Tenant, Repo: r.Repo, HostID: r.HostID, VCPU: r.VCPU,
+		PrebuildMatch: r.PrebuildMatch, Burst: r.Burst,
+		Prebuild: r.Prebuild, PrebuildBuild: r.prebuildBuild, Deferrable: r.Deferrable,
+		Region: r.Region, HostLoad: r.HostLoad, Outcome: r.Outcome,
+		Phases:    make(map[Phase]time.Time, len(r.phases)),
+		Steps:     append([]Step(nil), r.steps...),
+		CacheHits: r.cacheHits, CacheMisses: r.cacheMiss,
+	}
+	for p, t := range r.phases {
+		d.Phases[p] = t
+	}
+	return d
+}
+
+// FromData rebuilds a Record from its persisted form.
+func FromData(d RecordData) *Record {
+	r := NewRecord(d.JobID)
+	r.Tenant, r.Repo, r.HostID, r.VCPU = d.Tenant, d.Repo, d.HostID, d.VCPU
+	r.PrebuildMatch, r.Burst = d.PrebuildMatch, d.Burst
+	r.Prebuild, r.prebuildBuild, r.Deferrable = d.Prebuild, d.PrebuildBuild, d.Deferrable
+	r.Region, r.HostLoad, r.Outcome = d.Region, d.HostLoad, d.Outcome
+	for p, t := range d.Phases {
+		r.phases[p] = t
+	}
+	r.steps = append(r.steps, d.Steps...)
+	r.cacheHits, r.cacheMiss = d.CacheHits, d.CacheMisses
+	return r
+}
 
 // Billable is VM resumed to job finished: runner time, billed per second.
 func (r *Record) Billable() (time.Duration, bool) {

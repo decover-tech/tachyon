@@ -1,10 +1,14 @@
 package controlplane
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
 	"github.com/decover-tech/tachyon/internal/jobapi"
@@ -17,9 +21,18 @@ import (
 type hostConn struct {
 	id     string
 	region string
-	out    chan *hostlinkv1.LinkResponse
-	snaps  []*hostlinkv1.SnapshotRef
-	closed chan struct{}
+	// Placement-set attributes and the peer transfer address (replication.go).
+	arch          string
+	failureDomain string
+	peerAddr      string
+	out           chan *hostlinkv1.LinkResponse
+	snaps         []*hostlinkv1.SnapshotRef
+	draining      bool
+	hb            *hostlinkv1.Heartbeat // latest, for host metrics
+	closed        chan struct{}
+	// Last host view written to Core.Store; guarded by Core.mu.
+	saved      *scheduler.Host
+	savedRatio float64
 }
 
 func (h *hostConn) send(m *hostlinkv1.LinkResponse) {
@@ -29,10 +42,24 @@ func (h *hostConn) send(m *hostlinkv1.LinkResponse) {
 	}
 }
 
+// HostAuthenticator proves that a hostlink stream comes from hostID,
+// typically from its mTLS client certificate (hostauth.PeerAuthenticator).
+// It returns when the credential expires (zero for never); the stream is
+// closed then so the host reconnects with its rotated certificate.
+type HostAuthenticator interface {
+	AuthenticateHost(ctx context.Context, hostID string) (expires time.Time, err error)
+}
+
+// errCredentialExpired ends a stream whose client certificate expired.
+var errCredentialExpired = status.Error(codes.Unauthenticated, "host certificate expired; reconnect with a fresh one")
+
 // HostLink serves hostlink.v1.HostLinkService on top of a Core.
 type HostLink struct {
 	hostlinkv1.UnimplementedHostLinkServiceServer
 	Core *Core
+	// Auth authenticates each stream against its Hello.host_id. Nil accepts
+	// any host and is only for tests and local development.
+	Auth HostAuthenticator
 }
 
 // Link handles one hostd stream: Hello first, then heartbeats, job
@@ -47,13 +74,27 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 	if hello == nil || hello.GetHostId() == "" {
 		return errors.New("first message must be Hello with host_id")
 	}
-	// TODO: authenticate the host from its mTLS client certificate and
-	// check it matches hello.host_id.
+	var expiry <-chan time.Time
+	if s.Auth != nil {
+		expires, err := s.Auth.AuthenticateHost(stream.Context(), hello.GetHostId())
+		if err != nil {
+			c.log().Warn("host rejected", "host", hello.GetHostId(), "err", err)
+			return status.Errorf(codes.PermissionDenied, "host %q: %v", hello.GetHostId(), err)
+		}
+		if !expires.IsZero() {
+			t := time.NewTimer(time.Until(expires))
+			defer t.Stop()
+			expiry = t.C
+		}
+	}
 	hc := &hostConn{
-		id:     hello.GetHostId(),
-		region: hello.GetRegion(),
-		out:    make(chan *hostlinkv1.LinkResponse, 64),
-		closed: make(chan struct{}),
+		id:            hello.GetHostId(),
+		region:        hello.GetRegion(),
+		arch:          hello.GetArch(),
+		failureDomain: hello.GetFailureDomain(),
+		peerAddr:      hello.GetPeerAddress(),
+		out:           make(chan *hostlinkv1.LinkResponse, 64),
+		closed:        make(chan struct{}),
 	}
 	c.mu.Lock()
 	c.init()
@@ -64,14 +105,16 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 	c.mu.Unlock()
 	c.log().Info("host connected", "host", hc.id, "region", hc.region)
 
-	c.Scheduler.UpsertHost(scheduler.Host{
+	helloHost := scheduler.Host{
 		ID:            hc.id,
 		Region:        hello.GetRegion(),
 		FailureDomain: hello.GetFailureDomain(),
 		Arch:          jobapi.Arch(hello.GetArch()),
 		VCPU:          int(hello.GetVcpu()),
 		MemGB:         int(hello.GetMemoryGb()),
-	})
+	}
+	c.Scheduler.UpsertHost(helloHost)
+	c.saveHost(context.Background(), hc, helloHost)
 
 	sendErr := make(chan error, 1)
 	go func() {
@@ -88,17 +131,28 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 			case <-stream.Context().Done():
 				sendErr <- stream.Context().Err()
 				return
+			case <-expiry:
+				sendErr <- errCredentialExpired
+				return
 			}
 		}
 	}()
 
 	defer func() {
 		c.mu.Lock()
-		if c.hosts[hc.id] == hc {
+		gone := c.hosts[hc.id] == hc
+		if gone {
 			delete(c.hosts, hc.id)
 			close(hc.closed)
 		}
 		c.mu.Unlock()
+		// The rollout counts only connected hosts when it decides a
+		// version is on every host. A host that reconnects reports its
+		// images again in its next heartbeat. Skip this if a newer stream
+		// for the same host has already replaced this one.
+		if ir, ok := c.Images.(ImageRollout); ok && gone {
+			ir.ForgetHost(hc.id)
+		}
 		// Running jobs keep running on the host; capacity stays reserved
 		// until the host reconnects or is declared dead by missed heartbeats.
 	}()
@@ -123,8 +177,15 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 			s.onJobEvent(msg.JobEvent)
 		case *hostlinkv1.LinkRequest_JobResult:
 			s.onJobResult(hc, msg.JobResult)
+		case *hostlinkv1.LinkRequest_JobUsage:
+			c.onJobUsage(stream.Context(), msg.JobUsage)
 		case *hostlinkv1.LinkRequest_Hello:
 			return fmt.Errorf("host %s: duplicate Hello", hc.id)
+		}
+		if seq := m.GetSeq(); seq > 0 {
+			// The host keeps the message until acked and may resend it
+			// after a reconnect; onJobEvent and onJobResult are idempotent.
+			hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Ack{Ack: &hostlinkv1.Ack{Seq: seq}}})
 		}
 	}
 }
@@ -132,15 +193,24 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostlinkv1.Heartbeat) {
 	c := s.Core
 	repos := map[string]bool{}
+	var images []string
 	for _, ref := range hb.GetSnapshots() {
-		if ref.GetKind() == hostlinkv1.SnapshotRef_KIND_PREBUILD {
+		switch ref.GetKind() {
+		case hostlinkv1.SnapshotRef_KIND_PREBUILD:
 			repos[ref.GetRepo()] = true
+		case hostlinkv1.SnapshotRef_KIND_BASE_IMAGE:
+			images = append(images, ref.GetKey())
 		}
+	}
+	if ir, ok := c.Images.(ImageRollout); ok {
+		ir.ObserveHost(hc.id, images, hb.GetDraining())
 	}
 	c.mu.Lock()
 	hc.snaps = hb.GetSnapshots()
+	hc.draining = hb.GetDraining()
+	hc.hb = hb
 	c.mu.Unlock()
-	c.Scheduler.UpsertHost(scheduler.Host{
+	h := scheduler.Host{
 		ID:            hc.id,
 		Region:        hello.GetRegion(),
 		FailureDomain: hello.GetFailureDomain(),
@@ -149,7 +219,9 @@ func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostli
 		MemGB:         int(hello.GetMemoryGb()),
 		Snapshots:     repos,
 		Draining:      hb.GetDraining(),
-	})
+	}
+	c.Scheduler.UpsertHost(h)
+	c.saveHost(context.Background(), hc, h)
 }
 
 var phaseMap = map[hostlinkv1.Phase]telemetry.Phase{
@@ -171,17 +243,28 @@ func (s *HostLink) onJobEvent(ev *hostlinkv1.JobEvent) {
 	if ev.GetAt() != nil {
 		at = ev.GetAt().AsTime()
 	}
-	rec.Mark(p, at)
+	s.Core.markPhase(rec, p, at)
+	s.Core.saveRecord(context.Background(), rec)
 }
 
 func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 	c := s.Core
+	c.prebuildResult(r)
 	var usage *scheduler.Usage
 	if r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_SUCCEEDED || r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_FAILED {
 		usage = &scheduler.Usage{CPU: r.GetAvgBusyVcpu(), MemGB: r.GetPeakMemoryGb()}
+		if rec := c.Record(r.GetJobId()); rec != nil {
+			usage.Duration, _ = rec.Billable()
+		}
 	}
 	c.Scheduler.Release(r.GetJobId(), usage)
 	c.meterJob(r)
+	if ir, ok := c.Images.(ImageRollout); ok {
+		ir.ObserveResult(r.GetJobId(), r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_INFRA_ERROR)
+	}
+	c.observeJobFinished(r)
+	c.finishJob(context.Background(), r.GetJobId())
+	c.saveRecord(context.Background(), c.Record(r.GetJobId()))
 	if pb := r.GetPrebuild(); pb != nil && pb.GetKey() != "" {
 		if rec := c.Record(r.GetJobId()); rec != nil {
 			rec.MarkPrebuildBuild()
@@ -194,8 +277,31 @@ func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 			CreatedAt: time.Now(),
 			Healthy:   true,
 		})
+		c.replicatePrebuild(hc.id, pb)
 	}
+	c.finishAbuse(r)
 	c.log().Info("job finished", "job", r.GetJobId(), "host", hc.id, "outcome", r.GetOutcome().String())
+	if c.Results != nil {
+		c.Results.OnResult(context.Background(), jobapi.Result{
+			JobID:   r.GetJobId(),
+			Outcome: outcomeFromProto(r.GetOutcome()),
+			Error:   r.GetError(),
+		})
+	}
+}
+
+func outcomeFromProto(o hostlinkv1.JobResult_Outcome) jobapi.Outcome {
+	switch o {
+	case hostlinkv1.JobResult_OUTCOME_SUCCEEDED:
+		return jobapi.OutcomeSucceeded
+	case hostlinkv1.JobResult_OUTCOME_FAILED:
+		return jobapi.OutcomeFailed
+	case hostlinkv1.JobResult_OUTCOME_INFRA_ERROR:
+		return jobapi.OutcomeInfra
+	case hostlinkv1.JobResult_OUTCOME_CANCELLED:
+		return jobapi.OutcomeCancelled
+	}
+	return ""
 }
 
 // Meter receives each finished job's telemetry record; billing.Meter
@@ -283,8 +389,5 @@ func (c *Core) requestPull(hostID, repo string) {
 	if target == nil || from == nil {
 		return
 	}
-	target.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_PullSnapshot{PullSnapshot: &hostlinkv1.PullSnapshot{
-		Snapshot:   ref,
-		FromHostId: from.id,
-	}}})
+	c.brokerPull(target, from, ref)
 }

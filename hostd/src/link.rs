@@ -1,19 +1,24 @@
 //! The hostd side of hostlink.v1: dial the control plane, keep one stream
 //! open, heartbeat, run assigned jobs and report their results. If the
-//! stream drops, running jobs keep running and hostd reconnects.
+//! stream drops, running jobs keep running and hostd reconnects. Job events
+//! and results go through the outbox and are resent until acked.
 
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::cpustat::CpuSampler;
 use crate::hypervisor::Hypervisor;
 use crate::lifecycle::Agent;
+use crate::outbox::Outbox;
 use crate::pb::{self, host_link_service_client::HostLinkServiceClient};
+use crate::replicate;
 use crate::storage::Storage;
+use crate::telemetry::Metrics;
 
 #[derive(Debug, Clone)]
 pub struct HostInfo {
@@ -23,6 +28,16 @@ pub struct HostInfo {
     pub arch: String,
     pub vcpu: u32,
     pub memory_gb: u32,
+    /// Advertised address of this host's peer snapshot service; empty if
+    /// it serves no pulls.
+    pub peer_address: String,
+}
+
+/// Snapshot replication state shared by the link and the peer server.
+pub struct Peer {
+    pub grants: Arc<replicate::Grants>,
+    pub repl: replicate::Replicators,
+    pub opts: replicate::PullOptions,
 }
 
 /// Snapshots this host holds, reported on every heartbeat.
@@ -53,6 +68,14 @@ pub struct Link<H: Hypervisor + 'static, S: Storage + 'static> {
     pub control_plane: String,
     pub inventory: Arc<Inventory>,
     pub draining: Arc<AtomicBool>,
+    /// Snapshot replication; None ignores pull requests and grants.
+    pub peer: Option<Arc<Peer>>,
+    /// Job events and results not yet acked by the control plane.
+    pub outbox: Arc<Outbox>,
+    /// mTLS credentials, re-read on every connect; None only in insecure
+    /// development mode.
+    pub tls: Option<crate::tls::TlsFiles>,
+    pub metrics: Arc<Metrics>,
     running: Arc<Mutex<HashMap<String, ()>>>,
 }
 
@@ -67,6 +90,10 @@ where
             control_plane,
             inventory: Arc::default(),
             draining: Arc::default(),
+            peer: None,
+            outbox: Arc::default(),
+            tls: None,
+            metrics: Arc::new(Metrics::global()),
             running: Arc::default(),
         }
     }
@@ -85,7 +112,10 @@ where
     }
 
     async fn session(&self) -> Result<()> {
-        let mut client = HostLinkServiceClient::connect(self.control_plane.clone()).await?;
+        let channel = crate::tls::endpoint(&self.control_plane, self.tls.as_ref())?
+            .connect()
+            .await?;
+        let mut client = HostLinkServiceClient::new(channel);
         let (tx, rx) = mpsc::channel::<pb::LinkRequest>(256);
         let running: Vec<String> = self.running.lock().unwrap().keys().cloned().collect();
         tx.send(msg(pb::link_request::Msg::Hello(pb::Hello {
@@ -97,27 +127,38 @@ where
             memory_gb: self.info.memory_gb,
             hostd_version: env!("CARGO_PKG_VERSION").into(),
             running_job_ids: running,
+            peer_address: self.info.peer_address.clone(),
         })))
         .await?;
         let mut inbound = client.link(ReceiverStream::new(rx)).await?.into_inner();
         tracing::info!(control_plane = %self.control_plane, "linked");
 
         let hb = {
-            let (tx, agent, inv, draining) = (
+            let (tx, agent, inv, draining, metrics, running) = (
                 tx.clone(),
                 self.agent.clone(),
                 self.inventory.clone(),
                 self.draining.clone(),
+                self.metrics.clone(),
+                self.running.clone(),
             );
             tokio::spawn(async move {
+                let cpu = CpuSampler::default();
                 let mut tick = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     tick.tick().await;
+                    let warm = agent.warm_counts();
+                    let sample = cpu.sample();
+                    let n_running = running.lock().unwrap().len();
+                    metrics.update_host(&warm, sample, n_running);
+                    let (busy, steal) = sample.unwrap_or_default();
                     let beat = pb::Heartbeat {
                         at: Some(now()),
-                        warm_vms_by_vcpu: agent.warm_counts(),
+                        warm_vms_by_vcpu: warm,
                         snapshots: inv.list(),
                         draining: draining.load(Ordering::Relaxed),
+                        cpu_busy_fraction: busy,
+                        cpu_steal_fraction: steal,
                         ..Default::default()
                     };
                     if tx
@@ -131,10 +172,33 @@ where
             })
         };
 
+        let sweep = {
+            let agent = self.agent.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(crate::prefork::SWEEP_INTERVAL);
+                loop {
+                    tick.tick().await;
+                    let agent = agent.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let n = agent.expire_pre_forks(SystemTime::now());
+                        if n > 0 {
+                            tracing::info!(count = n, "expired pre-forks destroyed");
+                        }
+                    })
+                    .await;
+                }
+            })
+        };
+        // Replays everything unacked, then sends new events and results.
+        let fwd = tokio::spawn(forward(self.outbox.clone(), tx.clone()));
+
         let result = async {
             while let Some(m) = inbound.message().await? {
                 match m.msg {
-                    Some(pb::link_response::Msg::Assign(job)) => self.start_job(job, tx.clone()),
+                    Some(pb::link_response::Msg::Assign(job)) => {
+                        self.start_job(job);
+                    }
+                    Some(pb::link_response::Msg::Ack(a)) => self.outbox.ack(a.seq),
                     Some(pb::link_response::Msg::Drain(d)) => {
                         self.draining.store(d.drain, Ordering::Relaxed);
                         tracing::info!(drain = d.drain, "drain state changed");
@@ -152,14 +216,12 @@ where
                             }
                         });
                     }
-                    Some(pb::link_response::Msg::PreFork(p)) => {
-                        // TODO: clone a job disk ahead of the queued event.
-                        tracing::debug!(repo = %p.repo, "pre-fork hint ignored for now");
-                    }
-                    Some(pb::link_response::Msg::PullSnapshot(p)) => {
-                        // TODO: incremental zfs send/recv from the peer.
-                        tracing::info!(from = %p.from_host_id, "snapshot pull not implemented yet");
-                    }
+                    Some(pb::link_response::Msg::PreFork(p)) => self.start_pre_fork(p),
+                    Some(pb::link_response::Msg::PullSnapshot(p)) => self.pull_snapshot(p),
+                    Some(pb::link_response::Msg::ServeSnapshot(g)) => match &self.peer {
+                        Some(peer) => peer.grants.allow(&g, SystemTime::now()),
+                        None => tracing::warn!("snapshot grant ignored: peer service disabled"),
+                    },
                     None => {}
                 }
             }
@@ -167,29 +229,68 @@ where
         }
         .await;
         hb.abort();
+        sweep.abort();
+        fwd.abort();
         result
     }
 
-    fn start_job(&self, job: pb::AssignJob, tx: mpsc::Sender<pb::LinkRequest>) {
+    /// Clones a job disk for a hinted repo/commit off the async runtime.
+    /// Failures only cost the later job its head start.
+    fn start_pre_fork(&self, p: pb::PreFork) {
+        let agent = self.agent.clone();
+        tokio::task::spawn_blocking(move || match agent.pre_fork(&p, SystemTime::now()) {
+            Ok(()) => tracing::debug!(repo = %p.repo, commit = %p.commit, "pre-forked job disk"),
+            Err(e) => tracing::warn!(repo = %p.repo, error = %format!("{e:#}"), "pre-fork"),
+        });
+    }
+
+    /// Pulls a snapshot from a peer in the background and adds it to the
+    /// inventory, which tells the control plane on the next heartbeat.
+    fn pull_snapshot(&self, p: pb::PullSnapshot) {
+        let Some(peer) = self.peer.clone() else {
+            tracing::warn!(from = %p.from_host_id, "snapshot pull ignored: peer service disabled");
+            return;
+        };
+        let (inv, host_id) = (self.inventory.clone(), self.info.host_id.clone());
+        tokio::spawn(async move {
+            match replicate::pull(&host_id, &p, &peer.repl, &peer.opts).await {
+                Ok(r) => {
+                    tracing::info!(snapshot = %r.id, from = %p.from_host_id, "snapshot pulled");
+                    inv.put(r);
+                }
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "snapshot pull failed"),
+            }
+        });
+    }
+
+    fn start_job(&self, job: pb::AssignJob) -> tokio::task::JoinHandle<()> {
         let job_id = job.job_id.clone();
         self.running.lock().unwrap().insert(job_id.clone(), ());
-        self.agent.admit(&job_id);
-        let (agent, inv, running) = (
+        self.outbox.mark_running(&job_id);
+        let (agent, inv, running, outbox, metrics) = (
             self.agent.clone(),
             self.inventory.clone(),
             self.running.clone(),
+            self.outbox.clone(),
+            self.metrics.clone(),
         );
+        let assigned = Instant::now();
         tracing::info!(job = %job_id, repo = %job.repo, vcpu = job.vcpu, "assigned");
         tokio::task::spawn_blocking(move || {
-            let ev_tx = tx.clone();
+            let ev_outbox = outbox.clone();
             let ev_job = job_id.clone();
+            let ev_metrics = metrics.clone();
+            let (vcpu, prebuild_match) = (job.vcpu, job.prebuild_match.clone());
             let events = move |phase: pb::Phase| {
+                if phase == pb::Phase::VmResumed {
+                    ev_metrics.job_resumed(vcpu, &prebuild_match, assigned.elapsed());
+                }
                 let e = pb::JobEvent {
                     job_id: ev_job.clone(),
                     phase: phase as i32,
                     at: Some(now()),
                 };
-                let _ = ev_tx.blocking_send(msg(pb::link_request::Msg::JobEvent(e)));
+                ev_outbox.push(pb::link_request::Msg::JobEvent(e));
             };
             let result = agent.run_job(&job, &events);
             if let Some(p) = &result.prebuild {
@@ -199,19 +300,42 @@ where
                 inv.put(p.clone());
             }
             running.lock().unwrap().remove(&job_id);
+            metrics.job_finished(job.vcpu, result.outcome());
             tracing::info!(job = %job_id, outcome = ?result.outcome(), "finished");
-            // TODO: buffer results across reconnects instead of dropping
-            // them when this session's stream has closed.
-            let _ = tx.blocking_send(msg(pb::link_request::Msg::JobResult(result)));
+            // Kept until acked, across reconnects and restarts.
+            outbox.push(pb::link_request::Msg::JobResult(result));
+            outbox.mark_done(&job_id);
             if let Err(e) = agent.refill_pool() {
                 tracing::warn!(error = %format!("{e:#}"), "refill warm pool");
             }
-        });
+        })
+    }
+}
+
+/// Sends every unacked outbox message on this session's stream, oldest
+/// first, then each new one as it is pushed. Returns when the stream closes.
+async fn forward(outbox: Arc<Outbox>, tx: mpsc::Sender<pb::LinkRequest>) {
+    let mut pushed = outbox.subscribe();
+    let mut sent = 0;
+    loop {
+        pushed.borrow_and_update();
+        for m in outbox.pending_after(sent) {
+            sent = m.seq;
+            if tx.send(m).await.is_err() {
+                return;
+            }
+        }
+        if pushed.changed().await.is_err() {
+            return;
+        }
     }
 }
 
 fn msg(m: pb::link_request::Msg) -> pb::LinkRequest {
-    pb::LinkRequest { msg: Some(m) }
+    pb::LinkRequest {
+        msg: Some(m),
+        seq: 0,
+    }
 }
 
 fn now() -> prost_types::Timestamp {
@@ -221,6 +345,103 @@ fn now() -> prost_types::Timestamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hypervisor::fake::FakeHypervisor;
+    use crate::storage::fake::FakeStorage;
+
+    fn event(job: &str) -> pb::link_request::Msg {
+        pb::link_request::Msg::JobEvent(pb::JobEvent {
+            job_id: job.into(),
+            ..Default::default()
+        })
+    }
+
+    async fn recv(rx: &mut mpsc::Receiver<pb::LinkRequest>) -> u64 {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("forwarded")
+            .expect("open")
+            .seq
+    }
+
+    #[tokio::test]
+    async fn forward_replays_unacked_after_reconnect() {
+        let outbox = Arc::new(Outbox::default());
+        outbox.push(event("j1")); // queued while disconnected
+        outbox.push(event("j1"));
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let fwd = tokio::spawn(forward(outbox.clone(), tx));
+        assert_eq!(recv(&mut rx).await, 1);
+        assert_eq!(recv(&mut rx).await, 2);
+        outbox.push(event("j2")); // pushed while linked
+        assert_eq!(recv(&mut rx).await, 3);
+        outbox.ack(1);
+        fwd.abort(); // stream lost before 2 and 3 were acked
+
+        let (tx, mut rx) = mpsc::channel(16);
+        let fwd = tokio::spawn(forward(outbox.clone(), tx));
+        assert_eq!(recv(&mut rx).await, 2);
+        assert_eq!(recv(&mut rx).await, 3);
+        fwd.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_stops_when_stream_closes() {
+        let outbox = Arc::new(Outbox::default());
+        outbox.push(event("j1"));
+        let (tx, rx) = mpsc::channel(16);
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(2), forward(outbox, tx))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn job_result_buffered_while_disconnected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = Arc::new(Agent::new(
+            FakeHypervisor::default(),
+            FakeStorage::default(),
+            HashMap::new(),
+        ));
+        let mut link = Link::new(
+            agent,
+            HostInfo {
+                host_id: "h1".into(),
+                region: "r".into(),
+                failure_domain: "f".into(),
+                arch: "x86_64".into(),
+                vcpu: 4,
+                memory_gb: 16,
+                peer_address: String::new(),
+            },
+            "http://127.0.0.1:1".into(),
+        );
+        link.outbox = Arc::new(Outbox::open(tmp.path()).unwrap());
+        // No session is open: the result must still be kept.
+        link.start_job(pb::AssignJob {
+            job_id: "gh/1".into(),
+            vcpu: 4,
+            memory_gb: 16,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(link.outbox.has_result("gh/1"));
+        assert!(link.outbox.interrupted().is_empty(), "marker cleared");
+        let phases: Vec<_> = link
+            .outbox
+            .pending_after(0)
+            .into_iter()
+            .filter_map(|m| match m.msg {
+                Some(pb::link_request::Msg::JobEvent(e)) => Some(e.phase()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(phases.first(), Some(&pb::Phase::VmResumed));
+        // And it survives a restart.
+        assert!(Outbox::open(tmp.path()).unwrap().has_result("gh/1"));
+    }
 
     #[test]
     fn inventory_replaces_by_kind() {

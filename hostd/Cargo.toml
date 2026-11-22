@@ -13,14 +13,20 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+ed25519-dalek = "2"
+hex = "0.4"
 libc = "0.2"
+opentelemetry = { version = "0.27.1", default-features = false, features = ["metrics"] }
+opentelemetry-otlp = { version = "0.27.0", default-features = false, features = ["metrics", "grpc-tonic"] }
+opentelemetry_sdk = { version = "0.27.1", default-features = false, features = ["metrics", "rt-tokio"] }
 prost = "0.13"
 prost-types = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
-tokio-stream = "0.1"
-tonic = "0.12"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time", "signal"] }
+tokio-stream = { version = "0.1", features = ["net"] }
+tonic = { version = "0.12", features = ["tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
@@ -29,4 +35,5 @@ protox = "0.7"
 tonic-build = "0.12"
 
 [dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring", "crypto"] }
 tempfile = "3"

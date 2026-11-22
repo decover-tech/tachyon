@@ -13,16 +13,35 @@ import (
 	"time"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/abuse"
+	"github.com/decover-tech/tachyon/internal/cache"
 	"github.com/decover-tech/tachyon/internal/jobapi"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/scheduler"
+	"github.com/decover-tech/tachyon/internal/store"
 	"github.com/decover-tech/tachyon/internal/telemetry"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Images pins an image name (ubuntu-24.04) to its live version.
 type Images interface {
 	Pin(name string) (string, error) // -> ubuntu-24.04@2026-11-16
+}
+
+// ImageRollout is implemented by Images that roll a new version out to
+// canary hosts before the fleet (images.Rollout). Optional.
+type ImageRollout interface {
+	// AssignImage returns the version a placed job runs on (the canary on
+	// a canary host) and records it as in use.
+	AssignImage(jobID, image, hostID string) string
+	// Unassign forgets a job that was never dispatched.
+	Unassign(jobID string)
+	ObserveHost(hostID string, images []string, draining bool)
+	// ForgetHost drops a host that disconnected, so a host that never
+	// comes back does not hold every later version back from going live.
+	ForgetHost(hostID string)
+	ObserveResult(jobID string, infraError bool)
 }
 
 // Prebuilds is the prebuild registry.
@@ -52,6 +71,7 @@ type Core struct {
 	Secrets   SecretResolver
 	Burst     Burst
 	Meter     Meter // optional; bills finished jobs
+	Prebuild  PrebuildManager
 	Mirrors   mirrors.Endpoints
 	CacheURL  string
 	Log       *slog.Logger
@@ -64,12 +84,47 @@ type Core struct {
 	// OffPeak, if set, measures the off-peak class's utilization gain and
 	// deferral waits.
 	OffPeak *telemetry.OffPeak
+	// Store, if set, persists jobs, hosts and job records (see persist.go).
+	Store store.Store
+
+	// CacheSigner mints per-job cache tokens; nil sends no token.
+	CacheSigner *cache.Signer
+
+	// MirrorPair, if set, overrides Mirrors with the region's
+	// health-checked mirror pair (zero Endpoints = upstream).
+	MirrorPair interface{ Endpoints() mirrors.Endpoints }
+	// GitMirrored reports whether a repo (owner/name) is public and served
+	// by the region's git mirror. Only those repos get the git insteadOf
+	// rewrite: a private repo routed through the mirror would be
+	// redirected to GitHub without the checkout token (git scopes
+	// http.https://github.com/.extraheader to the rewritten mirror URL),
+	// and a repo the mirror doesn't serve gains nothing. nil means none.
+	GitMirrored func(repo string) bool
+	// Results, if set, receives every job result (e.g. the GitHub adapter,
+	// for opt-in re-runs of infrastructure failures).
+	Results jobapi.ResultHandler
+	// Observability (optional): fleet metrics, the per-job record export
+	// (ClickHouse) and the capacity prices used to cost each job.
+	Metrics    *telemetry.Metrics
+	JobRecords JobRecordSink
+	Pricing    telemetry.Pricing
+	// Limits, when set, refuses jobs over free/trial plan limits or from
+	// unverified or suspended tenants.
+	Limits *abuse.Gate
+	// Anomalies, when set, watches running jobs for mining and attack
+	// patterns; alerts that call for it cancel the job.
+	Anomalies *abuse.Monitor
 
 	mu       sync.Mutex
+	pbJobs   map[string]string // prebuild build job ID -> repo (prebuilds.go)
 	hosts    map[string]*hostConn
 	hints    map[string]hintEntry // repo@commit -> changed files
 	deferred []jobapi.Submission
 	records  map[string]*telemetry.Record
+	repl     replication // snapshot pulls in flight (replication.go)
+	// inflight holds the IDs of jobs a Submit call is working on, so a
+	// duplicate submission of the same ID can't race it.
+	inflight map[string]bool
 }
 
 type hintEntry struct {
@@ -89,6 +144,10 @@ func (c *Core) maxDeferral() time.Duration {
 	}
 	return DefaultMaxDeferral
 }
+
+// preForkTTL is how long a host holds a pre-forked job disk waiting for the
+// commit's first job before destroying it.
+const preForkTTL = 10 * time.Minute
 
 var _ jobapi.Core = (*Core)(nil)
 
@@ -111,6 +170,7 @@ func (c *Core) init() {
 		c.hosts = map[string]*hostConn{}
 		c.hints = map[string]hintEntry{}
 		c.records = map[string]*telemetry.Record{}
+		c.inflight = map[string]bool{}
 	}
 }
 
@@ -126,6 +186,7 @@ func (c *Core) Hint(ctx context.Context, h jobapi.Hint) error {
 		}
 	}
 	c.mu.Unlock()
+	c.prebuildHint(ctx, h)
 
 	repo := shortRepo(h.Repo)
 	snap, _ := c.Prebuilds.Latest(repo)
@@ -140,12 +201,14 @@ func (c *Core) Hint(ctx context.Context, h jobapi.Hint) error {
 		PreForkId:          h.Repo + "@" + h.Commit,
 		Repo:               repo,
 		PrebuildSnapshotId: ref.GetId(),
+		Commit:             h.Commit,
+		ExpiresAt:          timestamppb.New(c.now().Add(preForkTTL)),
 	}}})
 	return nil
 }
 
 // Submit plans, places and dispatches a job.
-func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
+func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 	spec := &sub.Spec
 	pinned, err := c.Images.Pin(spec.Image)
 	if err != nil {
@@ -154,6 +217,16 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	spec.Image = pinned
 	if err := spec.Validate(); err != nil {
 		return err
+	}
+	if c.Limits != nil {
+		if err := c.Limits.Admit(ctx, sub); err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				c.Limits.Release(spec.JobID)
+			}
+		}()
 	}
 	if sub.QueuedAt.IsZero() {
 		sub.QueuedAt = c.now()
@@ -167,11 +240,40 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 
 	c.mu.Lock()
 	c.init()
+	// A job ID that is already being submitted, waiting in the deferred
+	// queue or holding a reservation is a duplicate (the frontend's
+	// reconcile re-dispatches jobs that look stuck). Submitting it again
+	// would overwrite the persisted row of a job that may be running.
+	if c.inflight[spec.JobID] || c.deferredLocked(spec.JobID) || c.Scheduler.Placed(spec.JobID) {
+		c.mu.Unlock()
+		c.log().Info("duplicate submit ignored", "job", spec.JobID)
+		return nil
+	}
+	c.inflight[spec.JobID] = true
 	if len(sub.ChangedFiles) == 0 {
 		sub.ChangedFiles = c.hints[spec.Repo+"@"+spec.Commit].changed
 	}
+	_, resubmitted := c.records[spec.JobID]
 	c.records[spec.JobID] = rec
 	c.mu.Unlock()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			c.mu.Lock()
+			delete(c.inflight, spec.JobID)
+			c.mu.Unlock()
+		}
+	}()
+	// A job that can't be recorded is refused, so the frontend retries it
+	// rather than it being lost in a restart.
+	if err := c.saveJob(ctx, sub, store.JobQueued, nil); err != nil {
+		return fmt.Errorf("persist job %s: %w", spec.JobID, err)
+	}
+	defer c.saveRecord(ctx, rec)
+	if !resubmitted {
+		c.Metrics.JobQueued(ctx, sub.Region, spec.Hardware.VCPU)
+	}
+	rec.Region = sub.Region
 
 	place := c.Scheduler.Place
 	if overdue {
@@ -183,29 +285,54 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 		// Within its bound, a deferrable job waits for owned capacity
 		// rather than paying for burst.
 		sub.Deferrable && !overdue && errors.Is(err, scheduler.ErrNoCapacity):
+		// Persist before queueing: once the job is in c.deferred,
+		// RetryDeferred may place it, and a late "deferred" write would
+		// overwrite its "assigned" row.
+		c.noteJob(ctx, sub, store.JobDeferred, nil)
 		c.mu.Lock()
+		delete(c.inflight, spec.JobID)
 		c.deferred = append(c.deferred, sub)
 		c.mu.Unlock()
+		handedOff = true
+		return nil
+	case errors.Is(err, scheduler.ErrAlreadyPlaced):
+		// Placed by a path outside Submit; its row is not ours to change.
 		return nil
 	case errors.Is(err, scheduler.ErrNoCapacity):
 		rec.Burst = true
 		if c.Burst == nil {
+			c.noteJob(ctx, sub, store.JobRejected, nil)
 			return err
 		}
+		c.noteJob(ctx, sub, store.JobBurst, nil)
+		// Burst results do not come back over hostlink, so the job does
+		// not hold a plan slot. TODO: count burst jobs too.
+		defer c.releaseLimits(spec.JobID)
 		if err := c.Burst.Submit(ctx, sub); err != nil {
 			return err
 		}
+		c.Metrics.JobBurst(ctx, sub.Region, spec.Hardware.VCPU)
 		c.offPeakStarted(sub, overdue)
 		return nil
 	case err != nil:
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return err
 	}
 	rec.HostID = a.HostID
+	rec.HostLoad = c.Scheduler.Load(a.HostID)
 	rec.Mark(telemetry.HostAssigned, c.now())
+	ir, rolling := c.Images.(ImageRollout)
+	if rolling {
+		spec.Image = ir.AssignImage(spec.JobID, spec.Image, a.HostID)
+	}
 
 	msg, err := c.buildAssign(ctx, sub, a)
 	if err != nil {
 		c.Scheduler.Release(spec.JobID, nil)
+		if rolling {
+			ir.Unassign(spec.JobID)
+		}
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return err
 	}
 	rec.PrebuildMatch = msg.PrebuildMatch
@@ -215,8 +342,17 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) error {
 	c.mu.Unlock()
 	if hc == nil {
 		c.Scheduler.Release(spec.JobID, nil)
+		if rolling {
+			ir.Unassign(spec.JobID)
+		}
+		c.noteJob(ctx, sub, store.JobRejected, nil)
 		return fmt.Errorf("host %s not connected", a.HostID)
 	}
+	rec.Region = hc.region
+	// Recorded before sending: after a restart the reservation is restored
+	// and released by the host's result.
+	c.noteJob(ctx, sub, store.JobAssigned, &a)
+	c.trackAbuse(ctx, spec, a.HostID)
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
 	c.offPeakStarted(sub, overdue)
 	return nil
@@ -226,6 +362,17 @@ func (c *Core) offPeakStarted(sub jobapi.Submission, overdue bool) {
 	if sub.Deferrable && c.OffPeak != nil {
 		c.OffPeak.Started(c.now().Sub(sub.QueuedAt), overdue)
 	}
+}
+
+// deferredLocked reports whether jobID waits in the deferred queue. c.mu
+// must be held.
+func (c *Core) deferredLocked(jobID string) bool {
+	for _, d := range c.deferred {
+		if d.Spec.JobID == jobID {
+			return true
+		}
+	}
+	return false
 }
 
 // RetryDeferred re-submits deferred jobs, oldest first, and samples fleet
@@ -269,29 +416,45 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 		return nil, fmt.Errorf("resolve runner config: %w", err)
 	}
 
-	env := c.Mirrors.Env()
+	mir := c.Mirrors
+	if c.MirrorPair != nil {
+		mir = c.MirrorPair.Endpoints()
+	}
+	env := mir.Env()
 	env["TACHYON_JOB_ID"] = spec.JobID
 	env["TACHYON_PREBUILD_MATCH"] = string(fork.Match)
 	if cfg != nil && fork.Snapshot != nil {
 		env["TACHYON_WARM_PATHS"] = strings.Join(cfg.WorkspacePaths(), ":")
 	}
-	if c.CacheURL != "" {
-		env["TACHYON_CACHE_URL"] = c.CacheURL
+	cacheEnv, err := cache.GuestEnv(c.CacheURL, c.CacheSigner, spec)
+	if err != nil {
+		// No token means no cache service for this job; actions/cache
+		// treats that as a miss, so the job still runs.
+		c.log().Warn("cache token", "job", spec.JobID, "err", err)
+	}
+	for k, v := range cacheEnv {
+		env[k] = v
 	}
 	files := map[string][]byte{}
-	if b, err := c.Mirrors.DockerDaemonConfig(nil); err == nil && c.Mirrors.Registry != "" {
+	if b, err := mir.DockerDaemonConfig(nil); err == nil && mir.Registry != "" {
 		files["/etc/docker/daemon.json"] = b
 	}
-	if s := c.Mirrors.AptConf(); s != "" {
+	for p, s := range mir.ContainerdHosts() {
+		files[p] = []byte(s)
+	}
+	if s := mir.AptConf(); s != "" {
 		files["/etc/apt/apt.conf.d/01tachyon-proxy"] = []byte(s)
 	}
-	if s := c.Mirrors.GradleInit(); s != "" {
+	if s := mir.GradleInit(); s != "" {
 		files["~/.gradle/init.d/tachyon.gradle"] = []byte(s)
 	}
-	if s := c.Mirrors.MavenSettings(); s != "" {
+	if s := mir.MavenSettings(); s != "" {
 		files["~/.m2/settings.xml"] = []byte(s)
 	}
-	if s := c.Mirrors.GitConfig([]string{repo}); s != "" {
+	if c.GitMirrored == nil || !c.GitMirrored(repo) {
+		mir.Git = ""
+	}
+	if s := mir.GitConfig([]string{repo}); s != "" {
 		files["/etc/gitconfig.d/tachyon"] = []byte(s)
 	}
 

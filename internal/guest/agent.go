@@ -446,12 +446,11 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		return 0, err
 	}
 	code := 0
-	for i, c := range pb.WarmCommands {
-		a.log().Info("warm step", "step", i+1, "of", len(pb.WarmCommands))
-		exit, err := a.Sys.Run(ctx, Command{
+	step := func(stepEnv []string, c string) (int, error) {
+		return a.Sys.Run(ctx, Command{
 			Path:   l.Shell,
 			Args:   []string{"-euo", "pipefail", "-c", c},
-			Env:    env,
+			Env:    stepEnv,
 			Dir:    l.Workspace,
 			Root:   l.Root,
 			UID:    l.UID,
@@ -459,6 +458,35 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 			Stdout: a.output(),
 			Stderr: a.output(),
 		})
+	}
+	// The clone token is visible to the clone commands only.
+	var cloneToken []byte
+	if len(pb.CloneCommands) > 0 {
+		tok, err := base64.StdEncoding.DecodeString(pb.CloneTokenB64)
+		if err != nil {
+			return 0, errors.New("decode clone token")
+		}
+		cloneToken = tok
+		cloneEnv := append(append([]string(nil), env...), "TACHYON_CLONE_TOKEN="+string(tok))
+		for i, c := range pb.CloneCommands {
+			a.log().Info("clone step", "step", i+1, "of", len(pb.CloneCommands), "refresh", pb.Refresh)
+			exit, err := step(cloneEnv, c)
+			if err != nil {
+				return 0, fmt.Errorf("clone step %d: %w", i+1, err)
+			}
+			if exit != 0 {
+				a.log().Error("clone step failed", "step", i+1, "exit_code", exit)
+				code = exit
+				break
+			}
+		}
+	}
+	for i, c := range pb.WarmCommands {
+		if code != 0 {
+			break // the clone failed; nothing to warm
+		}
+		a.log().Info("warm step", "step", i+1, "of", len(pb.WarmCommands))
+		exit, err := step(env, c)
 		if err != nil {
 			return 0, fmt.Errorf("warm step %d: %w", i+1, err)
 		}
@@ -494,6 +522,9 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 	var literals [][]byte
 	if cfg, err := p.RunnerConfig(); err == nil && len(cfg) > 0 {
 		literals = append(literals, cfg)
+	}
+	if len(cloneToken) > 0 {
+		literals = append(literals, cloneToken)
 	}
 	findings, err := ScanSecrets(filepath.Join(l.JobMount, "upper"), literals)
 	clean := err == nil && len(findings) == 0

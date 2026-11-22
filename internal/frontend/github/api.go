@@ -4,7 +4,10 @@ import "context"
 
 // API is the subset of the GitHub REST API the adapter uses, authenticated as
 // the Tachyon GitHub App installation. The App requests only: self-hosted
-// runner management, Actions read, and contents read (for prebuilds).
+// runner management, Actions read, and contents read (for prebuilds); see
+// AppPermissions and Endpoints in app.go. Installations that opt in to
+// re-runs of infrastructure failures also grant Actions write, which
+// RerunJob needs.
 type API interface {
 	// RunContext looks up the workflow run behind a job.
 	RunContext(ctx context.Context, installationID int64, repo string, runID int64) (RunContext, error)
@@ -15,6 +18,9 @@ type API interface {
 	CreateJITConfig(ctx context.Context, installationID int64, repo, name string, labels []string) (JITRunner, error)
 	ListRunners(ctx context.Context, installationID int64, repo string) ([]Runner, error)
 	DeleteRunner(ctx context.Context, installationID int64, repo string, runnerID int64) error
+	// RerunJob re-runs one failed workflow job. GitHub accepts it only once
+	// the job's workflow run has completed.
+	RerunJob(ctx context.Context, installationID int64, repo string, jobID int64) error
 }
 
 type JITRunner struct {

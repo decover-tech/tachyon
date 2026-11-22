@@ -110,7 +110,7 @@ memory_snapshot: false
 
 This is the one place Tachyon is not fully drop-in. Tier 1 gains (outside the workspace) need nothing; tier 2 gains (inside it) need that step.
 
-**Correctness safeguards.** A job whose commit changes a key file still forks the latest prebuild but is marked partial, so its installs run. A nightly clean run per repo, without a prebuild, catches drift that only shows on a clean build. Any job can opt out with the `tachyon-clean` label, and a missing or damaged prebuild falls back to the base image: slower, never failed.
+**Correctness safeguards.** A job whose commit changes a key file still forks the latest prebuild but is marked partial, so its installs run. A nightly clean run per repo, without a prebuild, catches drift that only shows on a clean build: the GitHub adapter re-runs the repo's finished default-branch run for its newest commit that used a prebuild as a new attempt with every Tachyon job forked from the base image, compares the two attempts job by job, and reports any job whose result differs as a `Tachyon nightly clean run` check on the commit. A re-run repeats every job of the workflow run, deploy jobs included, so repos must opt in (`-nightly-repos`), and an older commit's run is never re-run (that could roll a deploy back). Workflows whose names suggest side effects (deploy, release, publish) are also skipped. Any job can opt out with the `tachyon-clean` label, and a missing or damaged prebuild falls back to the base image: slower, never failed.
 
 **Memory snapshots** (warm Gradle or Bazel daemons, a hot page cache) are off in v1. They are a Phase 3 experiment, allowed only from prebuild VMs that never held a secret.
 
@@ -181,6 +181,7 @@ trust: untrusted-fork   # trusted | untrusted | untrusted-fork
 3. For each queued job it creates a single-use, repository-scoped just-in-time runner config. Repository scope matters: GitHub hands a queued job to any matching idle runner, so org-wide runners would land jobs on hosts without that repo's prebuild.
 4. It submits the job spec; the runner registers, GitHub assigns the job, and the VM is destroyed afterward.
 5. A reconciliation loop retries jobs still queued after a timeout and removes orphaned runner registrations through the API.
+6. Once a night per opted-in repo it re-runs one finished default-branch run clean and reports divergence as a check run (see Prebuilds). This needs two further permissions, write access to Actions and to checks; without them the nightly run is skipped.
 
 The adapter derives `trust` from the event: default and protected branches are trusted, same-repo pull requests are untrusted, and pull requests from forks are untrusted-fork.
 

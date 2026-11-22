@@ -17,6 +17,9 @@
   "prebuild": {
     "warm_commands": ["npm ci", "go mod download"],
     "keep_paths": ["node_modules", "~/.npm"],
-    "scrub_paths": [".npmrc", ".docker/config.json"]
+    "scrub_paths": [".npmrc", ".docker/config.json"],
+    "clone_commands": ["git init -q", "git fetch --depth 1 origin abc"],
+    "clone_token_b64": "ZmFrZS1jbG9uZS10b2tlbg==",
+    "refresh": true
   }
 }

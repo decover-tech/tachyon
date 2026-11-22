@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/decover-tech/tachyon/internal/jobapi"
 )
@@ -294,5 +295,44 @@ func TestPlaceOverdueSkipsGateAndSplitsUtilization(t *testing.T) {
 	}
 	if total, def := New(nil).UtilizationSplit(); total != 0 || def != 0 {
 		t.Fatalf("empty fleet split = %v, %v", total, def)
+	}
+}
+
+func TestProfileP95DurationIgnoresUnknown(t *testing.T) {
+	p := &Profiles{MinSamples: 3}
+	for i := 0; i < 3; i++ {
+		p.Observe("k", Usage{CPU: 1, MemGB: 1})
+	}
+	if prof, ok := p.Get("k"); !ok || prof.P95Duration != 0 {
+		t.Fatalf("no durations: %+v ok=%v", prof, ok)
+	}
+	for i := 1; i <= 20; i++ {
+		p.Observe("k", Usage{CPU: 1, MemGB: 1, Duration: time.Duration(i) * time.Minute})
+	}
+	if prof, _ := p.Get("k"); prof.P95Duration != 19*time.Minute {
+		t.Fatalf("P95Duration = %v", prof.P95Duration)
+	}
+}
+
+func TestLoad(t *testing.T) {
+	s := New(nil)
+	s.UpsertHost(host("h", "us", 8, 1000))
+	if s.Load("h") != 0 || s.Load("missing") != 0 {
+		t.Fatal("idle load")
+	}
+	for _, id := range []string{"a", "b"} {
+		if _, err := s.Place(sub(id, 4)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.Place(sub("c", 2)); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Load("h"); got != 1.25 {
+		t.Fatalf("Load = %v, want 1.25 (10 of 8 vCPU reserved)", got)
+	}
+	s.Release("a", nil)
+	if got := s.Load("h"); got != 0.75 {
+		t.Fatalf("Load after release = %v", got)
 	}
 }
