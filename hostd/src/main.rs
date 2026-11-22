@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         binary: env_or("TACHYON_CH_BINARY", "/usr/local/bin/cloud-hypervisor").into(),
         ch_remote: env_or("TACHYON_CH_REMOTE", "/usr/local/bin/ch-remote").into(),
         run_dir,
-        base_snapshots: PathBuf::from(env("TACHYON_BASE_SNAPSHOTS")?),
+        snapshots: snapshot_source()?,
         cgroup_parent: env_or("TACHYON_CGROUP", "/sys/fs/cgroup/tachyon").into(),
         base_uid: env_or("TACHYON_BASE_UID", "100000").parse()?,
         next_slot: AtomicU32::new(0),
@@ -137,9 +137,11 @@ async fn main() -> Result<()> {
     )?);
 
     let agent = Arc::new(lifecycle::Agent::new(hv, storage, warm));
+    let images_root = std::env::var("TACHYON_IMAGES").ok().map(PathBuf::from);
     // Before Link::new, which creates the instruments on the global meter.
     let meter_provider = telemetry::init_otlp(&info)?;
     let serve_peers = !info.peer_address.is_empty();
+    let agent_for_images = agent.clone();
     let mut link = link::Link::new(agent.clone(), info, env("TACHYON_CONTROL_PLANE")?);
     link.outbox = outbox.clone();
     tokio::task::spawn_blocking({
@@ -147,10 +149,17 @@ async fn main() -> Result<()> {
         move || recover(&agent, &inv, &outbox)
     })
     .await?;
-    tokio::task::spawn_blocking(move || agent.refill_pool()).await??;
-    // Base images already on disk, so rollouts can seed from this host.
-    for r in replicate::image_refs(repl.images.as_ref())? {
-        link.inventory.put(r);
+    // A version whose snapshots fail to restore is logged by refill_pool
+    // and must not keep the host from serving jobs on other versions.
+    let _ = tokio::task::spawn_blocking(move || agent.refill_pool()).await?;
+    // Base image files on disk, so rollouts can seed from this host. Not
+    // with a versioned store: the control plane reads every base-image ref
+    // as "this host can run it", which only prepared versions (reported by
+    // `maintain_images`) satisfy.
+    if images_root.is_none() {
+        for r in replicate::image_refs(repl.images.as_ref())? {
+            link.inventory.put(r);
+        }
     }
     let peer = Arc::new(link::Peer {
         grants: Arc::default(),
@@ -178,12 +187,21 @@ async fn main() -> Result<()> {
         });
     }
     link.peer = Some(peer);
-    if let Ok(root) = std::env::var("TACHYON_IMAGES") {
+    if let Some(root) = images_root {
         // Report prepared base images so the control plane's rollout knows
-        // which versions this host can run.
-        for r in baseimage::ImageStore::new(root.into()).snapshot_refs() {
-            link.inventory.put(r);
-        }
+        // which versions this host can run, and keep that current as
+        // versions are prepared or removed.
+        let keep = std::env::var("TACHYON_IMAGES_KEEP")
+            .ok()
+            .map(|k| k.parse::<usize>())
+            .transpose()
+            .context("TACHYON_IMAGES_KEEP")?;
+        tokio::spawn(maintain_images(
+            agent_for_images,
+            link.inventory.clone(),
+            root,
+            keep,
+        ));
     }
     let tls = tls::TlsFiles::from_env(|k| std::env::var(k).ok())?;
     if tls.is_none() {
@@ -201,6 +219,84 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Where VMs restore base snapshots from. With TACHYON_IMAGES set, each
+/// job restores from the image version it is assigned, and a version that
+/// has not been prepared on this host is refused. Without it, the single
+/// static directory TACHYON_BASE_SNAPSHOTS (`<dir>/<vcpu>/`) serves every
+/// job; TACHYON_BASE_IMAGE=name@version additionally pins which image that
+/// directory holds, so jobs for any other version are refused.
+fn snapshot_source() -> Result<baseimage::SnapshotSource> {
+    snapshot_source_from(|k| std::env::var(k).ok())
+}
+
+fn snapshot_source_from(get: impl Fn(&str) -> Option<String>) -> Result<baseimage::SnapshotSource> {
+    if let Some(root) = get("TACHYON_IMAGES") {
+        if get("TACHYON_BASE_SNAPSHOTS").is_some() {
+            tracing::warn!("TACHYON_BASE_SNAPSHOTS is ignored while TACHYON_IMAGES is set");
+        }
+        return Ok(baseimage::SnapshotSource::Store(root.into()));
+    }
+    let dir = get("TACHYON_BASE_SNAPSHOTS").context(
+        "TACHYON_IMAGES (versioned images) or TACHYON_BASE_SNAPSHOTS (one image) is required",
+    )?;
+    let image = get("TACHYON_BASE_IMAGE");
+    if let Some(i) = &image {
+        baseimage::check_ref(i).context("TACHYON_BASE_IMAGE")?;
+    }
+    Ok(baseimage::SnapshotSource::Static {
+        dir: dir.into(),
+        image,
+    })
+}
+
+type HostAgent = lifecycle::Agent<hypervisor::CloudHypervisor, storage::Zfs<storage::ExecRunner>>;
+
+/// Every minute: reports the ready image versions in heartbeats (adding
+/// new ones, dropping removed ones), warms VMs for a newly prepared
+/// version, and, if `keep` is set, deletes old versions nothing uses.
+async fn maintain_images(
+    agent: Arc<HostAgent>,
+    inv: Arc<link::Inventory>,
+    root: PathBuf,
+    keep: Option<usize>,
+) {
+    let mut reported: std::collections::HashSet<String> = Default::default();
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        let (agent, inv, root, before) =
+            (agent.clone(), inv.clone(), root.clone(), reported.clone());
+        let res = tokio::task::spawn_blocking(move || {
+            let store = baseimage::ImageStore::new(root);
+            if let Some(k) = keep {
+                match agent.gc_images(&store, k) {
+                    Ok(removed) if !removed.is_empty() => {
+                        tracing::info!(?removed, "removed old base images");
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %format!("{e:#}"), "base image gc"),
+                }
+            }
+            let ready: std::collections::HashSet<String> = store.ready().into_iter().collect();
+            for r in store.snapshot_refs() {
+                inv.put(r);
+            }
+            for gone in before.difference(&ready) {
+                inv.remove(pb::snapshot_ref::Kind::BaseImage, gone);
+            }
+            // Warm VMs for a newly prepared version; failures are logged
+            // inside.
+            let _ = agent.refill_pool();
+            ready
+        })
+        .await;
+        match res {
+            Ok(ready) => reported = ready,
+            Err(e) => tracing::warn!(error = %e, "base image maintenance"),
+        }
+    }
 }
 
 /// Verifies a base image in TACHYON_IMAGES and builds its per-size paused
@@ -263,6 +359,45 @@ mod tests {
         assert_eq!(m[&2], 2);
         assert_eq!(m[&8], 1);
         assert!(super::parse_warm("2-2").is_err());
+    }
+
+    #[test]
+    fn snapshot_source_selection() {
+        use super::baseimage::SnapshotSource;
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| (*v).to_string())
+            }
+        };
+        assert_eq!(
+            super::snapshot_source_from(env(&[("TACHYON_IMAGES", "/img")])).unwrap(),
+            SnapshotSource::Store("/img".into())
+        );
+        // The store wins over the static directory.
+        assert!(matches!(
+            super::snapshot_source_from(env(&[
+                ("TACHYON_IMAGES", "/img"),
+                ("TACHYON_BASE_SNAPSHOTS", "/snap")
+            ]))
+            .unwrap(),
+            SnapshotSource::Store(_)
+        ));
+        assert_eq!(
+            super::snapshot_source_from(env(&[("TACHYON_BASE_SNAPSHOTS", "/snap")])).unwrap(),
+            SnapshotSource::Static {
+                dir: "/snap".into(),
+                image: None
+            }
+        );
+        assert!(super::snapshot_source_from(env(&[
+            ("TACHYON_BASE_SNAPSHOTS", "/snap"),
+            ("TACHYON_BASE_IMAGE", "../evil")
+        ]))
+        .is_err());
+        assert!(super::snapshot_source_from(env(&[])).is_err());
     }
 
     #[test]

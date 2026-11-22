@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::baseimage::SnapshotSource;
 use crate::jailer::{slot_ids, JailSpec};
 use crate::network::{EgressPolicy, HostNetwork, VmLink};
 use crate::rootfs::{self, GuestRoot};
@@ -148,8 +149,16 @@ pub struct Usage {
 pub trait Hypervisor: Send + Sync {
     type Vm: Send;
 
-    /// Restores a paused VM of the given size from the base snapshot.
-    fn restore_paused(&self, vcpu: u32, memory_gb: u32) -> Result<Self::Vm>;
+    /// Checks this host can run jobs on base image `image` (name@version)
+    /// and returns the canonical key warm VMs are pooled under. Fails if
+    /// the image is not prepared here; a job must never run on another
+    /// version.
+    fn check_image(&self, image: &str) -> Result<String>;
+    /// Canonical keys of the images to keep warm VMs for.
+    fn warm_images(&self) -> Vec<String>;
+    /// Restores a paused VM of the given size from the base snapshot of
+    /// `image`, a key returned by `check_image`.
+    fn restore_paused(&self, image: &str, vcpu: u32, memory_gb: u32) -> Result<Self::Vm>;
     /// Applies the job's CPU weight to a VM taken from the warm pool.
     fn set_cpu_weight(&self, vm: &mut Self::Vm, weight: u32) -> Result<()>;
     /// Replaces the VM's egress policy. Called before resume.
@@ -177,8 +186,9 @@ pub struct CloudHypervisor {
     pub ch_remote: PathBuf,
     /// Per-VM working directories are created here.
     pub run_dir: PathBuf,
-    /// Base snapshots, one per VM size: <dir>/<vcpu>/ (config.json, state.json, memory-ranges).
-    pub base_snapshots: PathBuf,
+    /// Where base snapshots come from: per image version and VM size, each a
+    /// directory with config.json, state.json and memory-ranges.
+    pub snapshots: SnapshotSource,
     pub cgroup_parent: PathBuf,
     pub base_uid: u32,
     pub next_slot: AtomicU32,
@@ -222,8 +232,16 @@ impl CloudHypervisor {
 impl Hypervisor for CloudHypervisor {
     type Vm = ChVm;
 
-    fn restore_paused(&self, vcpu: u32, memory_gb: u32) -> Result<ChVm> {
-        let snapshot = self.base_snapshots.join(vcpu.to_string());
+    fn check_image(&self, image: &str) -> Result<String> {
+        self.snapshots.check(image)
+    }
+
+    fn warm_images(&self) -> Vec<String> {
+        self.snapshots.warm_images()
+    }
+
+    fn restore_paused(&self, image: &str, vcpu: u32, memory_gb: u32) -> Result<ChVm> {
+        let snapshot = self.snapshots.dir(image, vcpu)?;
         // The base image must be shared read-only through virtio-pmem.
         rootfs::check_snapshot(&snapshot).context("base snapshot")?;
         let slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
@@ -480,6 +498,7 @@ pub mod fake {
 
     pub struct FakeVm {
         pub id: String,
+        pub image: String,
         pub vcpu: u32,
         pub disks: Vec<(String, String)>,
         pub payload: Option<GuestPayload>,
@@ -492,6 +511,12 @@ pub mod fake {
         pub exit_code: i32,
         pub fail_wait: bool,
         pub restored: AtomicU32,
+        /// (image, vcpu) of every restore, in order.
+        pub restored_from: Mutex<Vec<(String, u32)>>,
+        /// Images this host has prepared; None accepts any image.
+        pub prepared: Mutex<Option<Vec<String>>>,
+        /// Images `warm_images` reports.
+        pub warm: Mutex<Vec<String>>,
         pub destroyed: Mutex<Vec<String>>,
         pub payloads: Mutex<Vec<GuestPayload>>,
         /// When set, `wait` blocks until the guest is stopped or aborted,
@@ -506,10 +531,26 @@ pub mod fake {
 
     impl Hypervisor for FakeHypervisor {
         type Vm = FakeVm;
-        fn restore_paused(&self, vcpu: u32, _memory_gb: u32) -> Result<FakeVm> {
+        fn check_image(&self, image: &str) -> Result<String> {
+            match &*self.prepared.lock().unwrap() {
+                Some(p) if !p.iter().any(|x| x == image) => {
+                    bail!("base image {image} is not prepared on this host")
+                }
+                _ => Ok(image.to_string()),
+            }
+        }
+        fn warm_images(&self) -> Vec<String> {
+            self.warm.lock().unwrap().clone()
+        }
+        fn restore_paused(&self, image: &str, vcpu: u32, _memory_gb: u32) -> Result<FakeVm> {
             let n = self.restored.fetch_add(1, Ordering::Relaxed);
+            self.restored_from
+                .lock()
+                .unwrap()
+                .push((image.to_string(), vcpu));
             Ok(FakeVm {
                 id: format!("vm{n}"),
+                image: image.to_string(),
                 vcpu,
                 disks: vec![],
                 payload: None,

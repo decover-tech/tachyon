@@ -19,7 +19,7 @@
 //! is promoted.
 
 use anyhow::{Context, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
@@ -50,6 +50,8 @@ struct CancelState {
 
 type CancelSlot = Arc<Mutex<CancelState>>;
 
+type WarmPool<V> = HashMap<(String, u32), Vec<V>>;
+
 fn cancel_requested(slot: &CancelSlot) -> bool {
     slot.lock().unwrap().requested
 }
@@ -57,10 +59,14 @@ fn cancel_requested(slot: &CancelSlot) -> bool {
 pub struct Agent<H: Hypervisor, S: Storage> {
     pub hv: H,
     pub storage: S,
-    /// Paused VMs kept ready per vCPU size.
+    /// Paused VMs kept ready per vCPU size, for each warm image version.
     pub warm_target: HashMap<u32, usize>,
     pub cancel_grace: Duration,
-    pool: Mutex<HashMap<u32, Vec<H::Vm>>>,
+    /// Warm VMs by (image key, vCPU size).
+    pool: Mutex<WarmPool<H::Vm>>,
+    /// Image versions jobs on this host are using, with job counts. Held
+    /// back from `gc_images` for as long as the count is above zero.
+    images: Mutex<HashMap<String, usize>>,
     jobs: Mutex<HashMap<String, CancelSlot>>,
     /// Job disks forked ahead of assignment from push/PR hints.
     pub(crate) pre_forks: PreForks,
@@ -74,6 +80,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             warm_target,
             cancel_grace: CANCEL_GRACE,
             pool: Mutex::new(HashMap::new()),
+            images: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
             pre_forks: PreForks::default(),
         }
@@ -130,36 +137,145 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         });
     }
 
-    /// Restores paused VMs until every size reaches its target.
+    /// Restores paused VMs until every (warm image, size) reaches its
+    /// target. Warm VMs of images that are no longer warm (a newer version
+    /// was prepared) are destroyed; jobs for older versions still run, from
+    /// a VM restored on demand. One image failing to restore does not stop
+    /// the others; the first error is returned.
     pub fn refill_pool(&self) -> Result<()> {
-        for (&vcpu, &target) in &self.warm_target {
-            loop {
-                let have = self.pool.lock().unwrap().get(&vcpu).map_or(0, Vec::len);
-                if have >= target {
-                    break;
-                }
-                let vm = self.hv.restore_paused(vcpu, vcpu * 4)?;
-                self.pool.lock().unwrap().entry(vcpu).or_default().push(vm);
+        let images = self.hv.warm_images();
+        let stale: Vec<H::Vm> = {
+            let mut pool = self.pool.lock().unwrap();
+            let gone: Vec<(String, u32)> = pool
+                .keys()
+                .filter(|(img, _)| !images.contains(img))
+                .cloned()
+                .collect();
+            gone.into_iter()
+                .flat_map(|k| pool.remove(&k).unwrap_or_default())
+                .collect()
+        };
+        for vm in stale {
+            if let Err(e) = self.hv.destroy(vm) {
+                tracing::warn!(error = %format!("{e:#}"), "destroy stale warm VM");
             }
         }
-        Ok(())
+        let mut first_err = None;
+        for image in &images {
+            for (&vcpu, &target) in &self.warm_target {
+                loop {
+                    let have = self
+                        .pool
+                        .lock()
+                        .unwrap()
+                        .get(&(image.clone(), vcpu))
+                        .map_or(0, Vec::len);
+                    if have >= target {
+                        break;
+                    }
+                    match self.hv.restore_paused(image, vcpu, vcpu * 4) {
+                        Ok(vm) => self
+                            .pool
+                            .lock()
+                            .unwrap()
+                            .entry((image.clone(), vcpu))
+                            .or_default()
+                            .push(vm),
+                        Err(e) => {
+                            let e = e.context(format!("warm {image} at {vcpu} vCPU"));
+                            tracing::warn!(error = %format!("{e:#}"), "refill warm pool");
+                            first_err.get_or_insert(e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        first_err.map_or(Ok(()), Err)
     }
 
-    /// Warm VM counts per size, for heartbeats.
+    /// Warm VM counts per size, across image versions, for heartbeats.
     pub fn warm_counts(&self) -> HashMap<u32, u32> {
-        self.pool
+        let mut m = HashMap::new();
+        for ((_, vcpu), v) in self.pool.lock().unwrap().iter() {
+            *m.entry(*vcpu).or_insert(0) += v.len() as u32;
+        }
+        m
+    }
+
+    fn take_vm(&self, image: &str, vcpu: u32, memory_gb: u32) -> Result<H::Vm> {
+        let key = (image.to_string(), vcpu);
+        if let Some(vm) = self.pool.lock().unwrap().get_mut(&key).and_then(Vec::pop) {
+            return Ok(vm);
+        }
+        self.hv.restore_paused(image, vcpu, memory_gb)
+    }
+
+    /// Image versions with running jobs or warm VMs on this host.
+    pub fn images_in_use(&self) -> HashSet<String> {
+        let mut set: HashSet<String> = self
+            .images
             .lock()
             .unwrap()
             .iter()
-            .map(|(k, v)| (*k, v.len() as u32))
-            .collect()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, _)| k.clone())
+            .collect();
+        set.extend(
+            self.pool
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|((img, _), _)| img.clone()),
+        );
+        set
     }
 
-    fn take_vm(&self, vcpu: u32, memory_gb: u32) -> Result<H::Vm> {
-        if let Some(vm) = self.pool.lock().unwrap().get_mut(&vcpu).and_then(Vec::pop) {
-            return Ok(vm);
+    /// Deletes old image versions, keeping the newest `keep_newest` (at
+    /// least 2: the live version and the one before it, for rollback) of
+    /// each image and anything a job or warm VM is using. Jobs register
+    /// their image under the same lock, so a version cannot be removed
+    /// between a job being accepted and its VM restoring.
+    pub fn gc_images(
+        &self,
+        store: &crate::baseimage::ImageStore,
+        keep_newest: usize,
+    ) -> Result<Vec<String>> {
+        let _held = self.images.lock().unwrap();
+        let mut in_use: HashSet<String> = _held
+            .iter()
+            .filter(|(_, n)| **n > 0)
+            .map(|(k, _)| k.clone())
+            .collect();
+        in_use.extend(
+            self.pool
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, v)| !v.is_empty())
+                .map(|((img, _), _)| img.clone()),
+        );
+        store.gc(&in_use, keep_newest.max(2))
+    }
+
+    fn acquire_image(&self, image: &str) {
+        *self
+            .images
+            .lock()
+            .unwrap()
+            .entry(image.to_string())
+            .or_insert(0) += 1;
+    }
+
+    fn release_image(&self, image: &str) {
+        let mut m = self.images.lock().unwrap();
+        if let Some(n) = m.get_mut(image) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(image);
+            }
         }
-        self.hv.restore_paused(vcpu, memory_gb)
     }
 
     /// Runs one job to completion and reports what happened. Never panics on
@@ -173,7 +289,11 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         };
         let slot = self.slot(&job.job_id);
         let mut disks: Vec<String> = Vec::new(); // volumes to discard
+                                                 // Registered before anything reads the image, and held until the
+                                                 // VM is gone, so gc never removes it from under this job.
+        self.acquire_image(&job.base_image);
         let outcome = self.run_inner(job, events, &slot, &mut disks, &mut result);
+        self.release_image(&job.base_image);
         if let Err(e) = outcome {
             // An error after a cancel (e.g. tearing the VM down) is still
             // reported as a cancel, so it is not retried as an infra error.
@@ -203,6 +323,12 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         disks: &mut Vec<String>,
         result: &mut pb::JobResult,
     ) -> Result<()> {
+        // Refuse before forking disks or starting a VM: a job pinned to an
+        // image version this host has not prepared must not run on another.
+        let image = self
+            .hv
+            .check_image(&job.base_image)
+            .context("base image unavailable on this host")?;
         let trusted = job.trust() == pb::Trust::Trusted;
         let building = job.prebuild_build.as_ref();
         if building.is_some() && !trusted {
@@ -251,7 +377,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             return Ok(());
         }
 
-        let mut vm = self.take_vm(job.vcpu, job.memory_gb)?;
+        let mut vm = self.take_vm(&image, job.vcpu, job.memory_gb)?;
         let run = (|| -> Result<pb::job_result::Outcome> {
             self.hv.set_cpu_weight(&mut vm, job.cpu_weight.max(1))?;
             self.hv
@@ -776,10 +902,129 @@ mod tests {
     #[test]
     fn pool_refills_and_is_used() {
         let a = agent(FakeHypervisor::default(), seeded());
+        *a.hv.warm.lock().unwrap() = vec!["ubuntu-24.04@2026-11-16".into()];
         a.refill_pool().unwrap();
         assert_eq!(a.warm_counts()[&4], 2);
         a.run_job(&job(pb::Trust::Untrusted), &|_| {});
         assert_eq!(a.warm_counts()[&4], 1);
         assert_eq!(a.hv.restored.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    const OLD: &str = "ubuntu-24.04@2026-11-09";
+    const NEW: &str = "ubuntu-24.04@2026-11-16";
+
+    fn restored(a: &Agent<FakeHypervisor, FakeStorage>) -> Vec<(String, u32)> {
+        a.hv.restored_from.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn job_restores_from_its_assigned_image_version() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        *a.hv.warm.lock().unwrap() = vec![NEW.into()];
+        a.refill_pool().unwrap();
+        assert_eq!(
+            restored(&a),
+            vec![(NEW.to_string(), 4), (NEW.to_string(), 4)]
+        );
+
+        // A job on the warm version takes a pooled VM.
+        let r = a.run_job(&job(pb::Trust::Untrusted), &|_| {});
+        assert_eq!(r.outcome(), Outcome::Succeeded, "{}", r.error);
+        assert_eq!(restored(&a).len(), 2);
+
+        // A job pinned to the older version never takes the warm VMs of
+        // the newer one: it restores its own.
+        let mut old = job(pb::Trust::Untrusted);
+        old.base_image = OLD.into();
+        let r = a.run_job(&old, &|_| {});
+        assert_eq!(r.outcome(), Outcome::Succeeded, "{}", r.error);
+        assert_eq!(restored(&a).last().unwrap(), &(OLD.to_string(), 4));
+        assert_eq!(
+            a.warm_counts()[&4],
+            1,
+            "the new version's VM was left alone"
+        );
+    }
+
+    #[test]
+    fn unprepared_version_is_refused_without_side_effects() {
+        let hv = FakeHypervisor::default();
+        *hv.prepared.lock().unwrap() = Some(vec![NEW.into()]);
+        let a = agent(hv, seeded());
+        let mut j = job(pb::Trust::Trusted);
+        j.base_image = OLD.into();
+        let r = a.run_job(&j, &|_| {});
+        assert_eq!(r.outcome(), Outcome::InfraError);
+        assert!(r.error.contains("not prepared on this host"), "{}", r.error);
+        assert!(r.error.contains(OLD), "{}", r.error);
+        assert!(
+            restored(&a).is_empty(),
+            "no VM may start on the wrong image"
+        );
+        assert!(a.hv.payloads.lock().unwrap().is_empty());
+        assert!(
+            a.images_in_use().is_empty(),
+            "failed job still holds the image"
+        );
+        // The prepared version still runs.
+        assert_eq!(
+            a.run_job(&job(pb::Trust::Untrusted), &|_| {}).outcome(),
+            Outcome::Succeeded
+        );
+    }
+
+    #[test]
+    fn refill_drops_warm_vms_of_images_no_longer_warm() {
+        let a = agent(FakeHypervisor::default(), seeded());
+        *a.hv.warm.lock().unwrap() = vec![OLD.into()];
+        a.refill_pool().unwrap();
+        assert_eq!(a.images_in_use(), HashSet::from([OLD.to_string()]));
+        *a.hv.warm.lock().unwrap() = vec![NEW.into()];
+        a.refill_pool().unwrap();
+        assert_eq!(a.warm_counts()[&4], 2);
+        assert_eq!(a.images_in_use(), HashSet::from([NEW.to_string()]));
+        assert_eq!(a.hv.destroyed.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn gc_keeps_versions_with_running_jobs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = crate::baseimage::ImageStore::new(tmp.path().to_path_buf());
+        for v in ["2026-11-02", "2026-11-09", "2026-11-16", "2026-11-23"] {
+            std::fs::create_dir_all(store.dir(&format!("ubuntu-24.04@{v}")).unwrap()).unwrap();
+        }
+        let a = agent(FakeHypervisor::default(), seeded());
+        a.acquire_image("ubuntu-24.04@2026-11-02");
+        // keep_newest below 2 is raised to 2.
+        let removed = a.gc_images(&store, 0).unwrap();
+        assert_eq!(removed, vec!["ubuntu-24.04@2026-11-09".to_string()]);
+        assert!(store.dir("ubuntu-24.04@2026-11-02").unwrap().exists());
+
+        // Once the job ends the old version is collectable.
+        a.release_image("ubuntu-24.04@2026-11-02");
+        let removed = a.gc_images(&store, 2).unwrap();
+        assert_eq!(removed, vec!["ubuntu-24.04@2026-11-02".to_string()]);
+        assert!(store.dir("ubuntu-24.04@2026-11-23").unwrap().exists());
+        assert!(store.dir("ubuntu-24.04@2026-11-16").unwrap().exists());
+    }
+
+    #[test]
+    fn running_job_holds_its_image() {
+        let hv = FakeHypervisor {
+            block_wait: true,
+            ..Default::default()
+        };
+        let a = Arc::new(agent(hv, seeded()));
+        let runner = {
+            let a = a.clone();
+            std::thread::spawn(move || a.run_job(&job(pb::Trust::Untrusted), &|_| {}))
+        };
+        while !a.hv.guest.waiting() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(a.images_in_use(), HashSet::from([NEW.to_string()]));
+        assert!(a.cancel("gh_1"));
+        runner.join().unwrap();
+        assert!(a.images_in_use().is_empty());
     }
 }
