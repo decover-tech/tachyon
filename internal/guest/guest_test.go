@@ -659,6 +659,9 @@ func TestPrebuildSecretScanFails(t *testing.T) {
 			if !strings.Contains(e.logs.String(), "/home/runner/leak.txt") {
 				t.Error("finding not logged")
 			}
+			if !strings.HasPrefix(res.Failure, "secret scan: 1 finding(s): /home/runner/leak.txt (") || strings.Contains(res.Failure, strings.Repeat("a", 36)) {
+				t.Errorf("failure %q", res.Failure)
+			}
 			assertNoSecretInLogs(t, e.logs.String())
 			if strings.Contains(e.logs.String(), strings.Repeat("a", 36)) {
 				t.Error("matched token logged")

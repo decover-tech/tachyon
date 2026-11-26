@@ -458,7 +458,10 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             guest_failure = guest.failure.clone();
             events(pb::Phase::JobFinished);
             if building.is_some() && guest.secret_scan_clean != Some(true) {
-                anyhow::bail!("prebuild secret scan failed or did not run");
+                anyhow::bail!(
+                    "prebuild secret scan failed or did not run: {}",
+                    guest.failure
+                );
             }
             Ok(if guest.exit_code == 0 {
                 pb::job_result::Outcome::Succeeded

@@ -601,7 +601,28 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		a.log().Error("secret found in prebuild", "path", f.Path, "rule", f.Rule)
 	}
 	res.SecretScanClean = &clean
+	if !clean {
+		res.Failure = scanFailure(findings, err)
+	}
 	return code, nil
+}
+
+// scanFailure names what failed the secret scan: its error, or the files and
+// rules that matched (never the matched text).
+func scanFailure(findings []Finding, err error) string {
+	if err != nil {
+		return "secret scan: " + err.Error()
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "secret scan: %d finding(s):", len(findings))
+	for _, f := range findings {
+		if b.Len() > failureTail {
+			b.WriteString(" ...")
+			break
+		}
+		fmt.Fprintf(&b, " %s (%s)", f.Path, f.Rule)
+	}
+	return b.String()
 }
 
 func sortedKeys[V any](m map[string]V) []string {
