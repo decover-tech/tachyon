@@ -285,6 +285,12 @@ where
             self.metrics.clone(),
         );
         let assigned = Instant::now();
+        // perf-only: when the assignment reached this host, on its clock.
+        outbox.push(pb::link_request::Msg::JobEvent(pb::JobEvent {
+            job_id: job_id.clone(),
+            phase: pb::Phase::HostReceived as i32,
+            at: Some(now()),
+        }));
         tracing::info!(job = %job_id, repo = %job.repo, vcpu = job.vcpu, "assigned");
         tokio::task::spawn_blocking(move || {
             let ev_outbox = outbox.clone();
@@ -300,7 +306,12 @@ where
                     phase: phase as i32,
                     at: Some(now()),
                 };
-                ev_outbox.push(pb::link_request::Msg::JobEvent(e));
+                // Each push fsyncs the outbox on the job's path.
+                crate::timeline::span_with(
+                    "outbox_push",
+                    &[("phase", phase.as_str_name())],
+                    || ev_outbox.push(pb::link_request::Msg::JobEvent(e)),
+                );
             };
             let result = agent.run_job(&job, &events);
             if let Some(p) = &result.prebuild {
@@ -449,7 +460,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(phases.first(), Some(&pb::Phase::VmResumed));
+        // perf-only: the host's receipt comes first, then the VM phases.
+        assert_eq!(
+            phases.get(..2),
+            Some(&[pb::Phase::HostReceived, pb::Phase::VmResumed][..])
+        );
         // And it survives a restart.
         assert!(Outbox::open(tmp.path()).unwrap().has_result("gh/1"));
     }

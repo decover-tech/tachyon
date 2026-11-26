@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::baseimage::SnapshotSource;
 use crate::jailer::{slot_ids, JailSpec};
@@ -119,6 +119,57 @@ pub struct GuestResult {
     /// For failed prebuild builds: the failing step and its last output.
     #[serde(default)]
     pub failure: String,
+    /// perf-only: the guest's steps, timed on its monotonic clock from the
+    /// payload's arrival. Marks (runner_online, job_started) have dur 0.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub timeline: Vec<GuestSpan>,
+    /// perf-only: the guest's wall clock when the payload arrived, Unix
+    /// milliseconds; compared with the host's anchor to measure guest skew.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_unix_ms: Option<f64>,
+}
+
+/// perf-only: one guest step, relative to the payload's arrival.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct GuestSpan {
+    pub name: String,
+    pub start_ms: f64,
+    pub dur_ms: f64,
+    #[serde(default)]
+    pub depth: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attrs: BTreeMap<String, String>,
+}
+
+impl GuestResult {
+    /// The guest's spans on the host clock: `anchor` is when hostd finished
+    /// sending the payload. The first span records the guest's clock skew
+    /// (guest wall clock minus anchor) when the guest reported its own.
+    pub fn anchored_spans(&self, anchor: SystemTime) -> Vec<crate::timeline::Span> {
+        let ms = |v: f64| Duration::from_secs_f64(v.max(0.0) / 1000.0);
+        let skew = self.received_unix_ms.and_then(|g| {
+            let host = anchor.duration_since(std::time::UNIX_EPOCH).ok()?;
+            Some((g - host.as_secs_f64() * 1000.0).round() as i64)
+        });
+        self.timeline
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let mut attrs = g.attrs.clone();
+                if let (0, Some(s)) = (i, skew) {
+                    attrs.insert("guest_clock_skew_ms".into(), s.to_string());
+                }
+                crate::timeline::Span {
+                    component: "guest",
+                    name: format!("guest.{}", g.name),
+                    start: anchor + ms(g.start_ms),
+                    duration: ms(g.dur_ms),
+                    depth: g.depth,
+                    attrs,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Control messages hostd sends the guest agent after the payload, on the
@@ -215,12 +266,15 @@ impl CloudHypervisor {
     }
 
     fn ch_remote(&self, vm: &ChVm, args: &[&str]) -> Result<()> {
-        let out = Command::new(&self.ch_remote)
-            .arg("--api-socket")
-            .arg(self.api_socket(vm))
-            .args(args)
-            .output()
-            .context("spawn ch-remote")?;
+        let name = format!("exec ch-remote {}", args.first().copied().unwrap_or(""));
+        let out = crate::timeline::span(name, || {
+            Command::new(&self.ch_remote)
+                .arg("--api-socket")
+                .arg(self.api_socket(vm))
+                .args(args)
+                .output()
+        })
+        .context("spawn ch-remote")?;
         if !out.status.success() {
             bail!(
                 "ch-remote {}: {}",
@@ -255,7 +309,7 @@ impl Hypervisor for CloudHypervisor {
         std::os::unix::fs::chown(&dir, Some(uid), Some(gid))?;
         // The tap must exist, owned by the VM's user, before the restored
         // VM opens it; egress stays denied until a job's policy is set.
-        let link = self.net.setup(slot, uid, gid)?;
+        let link = crate::timeline::span("vm.net_setup", || self.net.setup(slot, uid, gid))?;
         let jail = JailSpec {
             job_id: id.clone(),
             uid,
@@ -267,7 +321,7 @@ impl Hypervisor for CloudHypervisor {
             bind: Some((dir.clone(), PathBuf::from(IN_JAIL_DIR))),
             netns: Some(link.netns_path()),
         };
-        if let Err(e) = jail.create_cgroup() {
+        if let Err(e) = crate::timeline::span("vm.cgroup_create", || jail.create_cgroup()) {
             let _ = self.net.teardown(&link);
             return Err(e);
         }
@@ -279,10 +333,10 @@ impl Hypervisor for CloudHypervisor {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        let child = match jail
-            .apply(&mut cmd)
-            .and_then(|()| cmd.spawn().context("spawn cloud-hypervisor"))
-        {
+        let child = match crate::timeline::span("vm.spawn_ch", || {
+            jail.apply(&mut cmd)
+                .and_then(|()| cmd.spawn().context("spawn cloud-hypervisor"))
+        }) {
             Ok(c) => c,
             Err(e) => {
                 let _ = jail.remove_cgroup();
@@ -300,7 +354,9 @@ impl Hypervisor for CloudHypervisor {
             agent: None,
             started: Instant::now(),
         };
-        if let Err(e) = wait_for_socket(&self.api_socket(&vm), Duration::from_secs(5)) {
+        if let Err(e) = crate::timeline::span("vm.wait_api_socket", || {
+            wait_for_socket(&self.api_socket(&vm), Duration::from_secs(5))
+        }) {
             let mut vm = vm;
             let _ = vm.child.kill();
             let _ = vm.child.wait();
@@ -543,6 +599,8 @@ pub mod fake {
         pub guest: Arc<FakeGuest>,
         /// Egress policies set, with whether the VM was already resumed.
         pub egress: Mutex<Vec<(EgressPolicy, bool)>>,
+        /// perf-only: the timeline the guest reports.
+        pub guest_timeline: Vec<GuestSpan>,
     }
 
     impl Hypervisor for FakeHypervisor {
@@ -619,6 +677,7 @@ pub mod fake {
             Ok(GuestResult {
                 exit_code: self.exit_code,
                 secret_scan_clean: Some(true),
+                timeline: self.guest_timeline.clone(),
                 ..Default::default()
             })
         }
@@ -720,9 +779,60 @@ mod tests {
         assert_eq!(r.phases["runner_online"], "2026-11-21T10:00:00Z");
         assert_eq!(r.phases["job_started"], "2026-11-21T10:00:01Z");
         assert_eq!(r.secret_scan_clean, Some(true));
+        assert_eq!(r.received_unix_ms, Some(1795341600000.0));
+        assert_eq!(
+            r.timeline,
+            vec![
+                GuestSpan {
+                    name: "mount_disks".into(),
+                    start_ms: 0.5,
+                    dur_ms: 120.25,
+                    depth: 0,
+                    attrs: BTreeMap::from([("count".into(), "2".into())]),
+                },
+                GuestSpan {
+                    name: "runner_online".into(),
+                    start_ms: 900.0,
+                    dur_ms: 0.0,
+                    depth: 1,
+                    attrs: BTreeMap::new(),
+                },
+            ]
+        );
         // A job's result omits the scan.
         let r: GuestResult = serde_json::from_str(r#"{"exit_code":3,"phases":{}}"#).unwrap();
         assert_eq!(r.secret_scan_clean, None);
+    }
+
+    #[test]
+    fn guest_spans_anchor_on_the_host_clock() {
+        let anchor = std::time::UNIX_EPOCH + Duration::from_millis(1_795_341_600_250);
+        let r = GuestResult {
+            timeline: vec![
+                GuestSpan {
+                    name: "mount_disks".into(),
+                    start_ms: 1.0,
+                    dur_ms: 120.0,
+                    ..Default::default()
+                },
+                GuestSpan {
+                    name: "runner_online".into(),
+                    start_ms: 900.0,
+                    ..Default::default()
+                },
+            ],
+            // The guest's clock is 250 ms behind the host's.
+            received_unix_ms: Some(1_795_341_600_000.0),
+            ..Default::default()
+        };
+        let s = r.anchored_spans(anchor);
+        assert_eq!(s[0].name, "guest.mount_disks");
+        assert_eq!(s[0].component, "guest");
+        assert_eq!(s[0].start, anchor + Duration::from_millis(1));
+        assert_eq!(s[0].duration, Duration::from_millis(120));
+        assert_eq!(s[0].attrs["guest_clock_skew_ms"], "-250");
+        assert_eq!(s[1].start, anchor + Duration::from_millis(900));
+        assert!(!s[1].attrs.contains_key("guest_clock_skew_ms"));
     }
 
     #[test]

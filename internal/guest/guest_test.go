@@ -263,6 +263,11 @@ func TestResultMatchesHostdWireFormat(t *testing.T) {
 			PhaseJobStarted:   "2026-11-21T10:00:01Z",
 		},
 		SecretScanClean: &clean,
+		Timeline: []TimelineSpan{
+			{Name: "mount_disks", StartMS: 0.5, DurMS: 120.25, Attrs: map[string]string{"count": "2"}},
+			{Name: "runner_online", StartMS: 900, Depth: 1},
+		},
+		ReceivedUnixMS: 1795341600000,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -519,6 +524,67 @@ func TestSetupFailures(t *testing.T) {
 			}
 			assertNoSecretInLogs(t, e.logs.String())
 		})
+	}
+}
+
+// perf-only: the result carries the agent's steps in order, timed from the
+// payload's arrival, with the runner's phases as marks inside the runner
+// span, and quiesce (done after Run, in Serve) last.
+func TestTimeline(t *testing.T) {
+	e := newTestEnv(t)
+	tick := time.Date(2026, 11, 21, 9, 0, 0, 0, time.UTC)
+	e.agent.TimelineNow = func() time.Time {
+		tick = tick.Add(10 * time.Millisecond)
+		return tick
+	}
+	e.sys.run = runnerOutput(successLines, 0)
+	var conn bytes.Buffer
+	body, err := json.Marshal(jobPayload())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFrame(&conn, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.agent.Serve(context.Background(), &conn); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadFrame(&conn, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res Result
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatal(err)
+	}
+	type step struct {
+		name  string
+		depth int
+	}
+	var got []step
+	for _, s := range res.Timeline {
+		got = append(got, step{s.Name, s.Depth})
+	}
+	want := []step{
+		{"mount_disks", 0}, {"write_files", 0}, {"start_docker", 0}, {"stash_warm_paths", 0}, {"runner", 0},
+		{PhaseRunnerOnline, 1}, {PhaseJobStarted, 1}, {"quiesce", 0},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("timeline = %+v", got)
+	}
+	if res.Timeline[0].StartMS != 10 || res.Timeline[0].DurMS <= 0 {
+		t.Errorf("first span = %+v; want start 10 ms after arrival", res.Timeline[0])
+	}
+	if res.Timeline[0].Attrs["count"] != "2" {
+		t.Errorf("mount_disks attrs = %v", res.Timeline[0].Attrs)
+	}
+	if want := float64(time.Date(2026, 11, 21, 9, 0, 0, 10e6, time.UTC).UnixNano()) / 1e6; res.ReceivedUnixMS != want {
+		t.Errorf("received_unix_ms = %v, want %v", res.ReceivedUnixMS, want)
+	}
+	for i := 1; i < len(res.Timeline); i++ {
+		if res.Timeline[i].StartMS < res.Timeline[i-1].StartMS {
+			t.Errorf("span %d starts before span %d", i, i-1)
+		}
 	}
 }
 

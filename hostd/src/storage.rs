@@ -57,10 +57,10 @@ pub struct ExecRunner;
 
 impl CommandRunner for ExecRunner {
     fn run(&self, program: &str, args: &[String]) -> Result<String> {
-        let out = Command::new(program)
-            .args(args)
-            .output()
-            .with_context(|| format!("spawn {program}"))?;
+        let out = crate::timeline::span(crate::timeline::command_name(program, args), || {
+            Command::new(program).args(args).output()
+        })
+        .with_context(|| format!("spawn {program}"))?;
         if !out.status.success() {
             bail!(
                 "{program} {}: {}: {}",

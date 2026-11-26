@@ -24,11 +24,13 @@ type phaseWatcher struct {
 	now    func() time.Time
 	buf    []byte
 	phases map[string]string
+	times  map[string]time.Time // perf-only: same phases, timeline clock
+	tnow   func() time.Time     // perf-only: the timeline's clock
 	result string
 }
 
 func newPhaseWatcher(out io.Writer, now func() time.Time) *phaseWatcher {
-	return &phaseWatcher{out: out, now: now, phases: map[string]string{}}
+	return &phaseWatcher{out: out, now: now, phases: map[string]string{}, times: map[string]time.Time{}}
 }
 
 func (w *phaseWatcher) Write(p []byte) (int, error) {
@@ -65,6 +67,9 @@ func (w *phaseWatcher) line(s string) {
 	mark := func(phase string) {
 		if _, ok := w.phases[phase]; !ok {
 			w.phases[phase] = w.now().UTC().Format(time.RFC3339Nano)
+			if w.tnow != nil {
+				w.times[phase] = w.tnow()
+			}
 		}
 	}
 	switch {
@@ -84,6 +89,17 @@ func (w *phaseWatcher) Phases() map[string]string {
 	defer w.mu.Unlock()
 	out := make(map[string]string, len(w.phases))
 	for k, v := range w.phases {
+		out[k] = v
+	}
+	return out
+}
+
+// PhaseTimes returns the recorded phases' times (perf-only).
+func (w *phaseWatcher) PhaseTimes() map[string]time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make(map[string]time.Time, len(w.times))
+	for k, v := range w.times {
 		out[k] = v
 	}
 	return out

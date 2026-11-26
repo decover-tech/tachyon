@@ -206,8 +206,10 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
     fn take_vm(&self, image: &str, vcpu: u32, memory_gb: u32) -> Result<H::Vm> {
         let key = (image.to_string(), vcpu);
         if let Some(vm) = self.pool.lock().unwrap().get_mut(&key).and_then(Vec::pop) {
+            crate::timeline::attr("warm", "hit");
             return Ok(vm);
         }
+        crate::timeline::attr("warm", "miss");
         self.hv.restore_paused(image, vcpu, memory_gb)
     }
 
@@ -281,6 +283,16 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
     /// Runs one job to completion and reports what happened. Never panics on
     /// job or infrastructure errors; they become the result's outcome.
     pub fn run_job(&self, job: &pb::AssignJob, events: Events) -> pb::JobResult {
+        crate::timeline::begin();
+        let mut result = self.run_job_timed(job, events);
+        result.spans = crate::timeline::finish()
+            .iter()
+            .map(crate::timeline::Span::to_proto)
+            .collect();
+        result
+    }
+
+    fn run_job_timed(&self, job: &pb::AssignJob, events: Events) -> pb::JobResult {
         let mut result = pb::JobResult {
             job_id: job.job_id.clone(),
             base_image: job.base_image.clone(),
@@ -308,7 +320,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         // Discard whatever wasn't kept. Errors here are logged, not
         // surfaced: the job's result is already decided.
         for d in disks.into_iter().rev() {
-            if let Err(e) = self.storage.destroy(&d) {
+            if let Err(e) = crate::timeline::span("discard_disk", || self.storage.destroy(&d)) {
                 tracing::warn!(job = %job.job_id, disk = %d, error = %e, "discard disk");
             }
         }
@@ -325,9 +337,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
     ) -> Result<()> {
         // Refuse before forking disks or starting a VM: a job pinned to an
         // image version this host has not prepared must not run on another.
-        let image = self
-            .hv
-            .check_image(&job.base_image)
+        let image = crate::timeline::span("check_image", || self.hv.check_image(&job.base_image))
             .context("base image unavailable on this host")?;
         let trusted = job.trust() == pb::Trust::Trusted;
         let building = job.prebuild_build.as_ref();
@@ -341,35 +351,43 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
 
         // Job disk: a disk pre-forked for this repo/commit if one is held,
         // else a copy-on-write fork of the prebuild, or an empty disk.
-        let job_disk = if let Some(d) = self.take_pre_fork(job, SystemTime::now()) {
-            tracing::info!(job = %job.job_id, disk = %d, "using pre-forked disk");
-            d
-        } else {
+        let job_disk = crate::timeline::span("job_disk", || -> Result<String> {
+            if let Some(d) = self.take_pre_fork(job, SystemTime::now()) {
+                crate::timeline::attr("source", "pre_fork");
+                tracing::info!(job = %job.job_id, disk = %d, "using pre-forked disk");
+                return Ok(d);
+            }
             let d = storage::job_disk(&job.job_id);
             if job.prebuild_snapshot_id.is_empty() {
+                crate::timeline::attr("source", "empty");
                 self.storage.create_empty(&d, EMPTY_DISK_GB)?;
             } else {
+                crate::timeline::attr("source", "prebuild_clone");
                 self.storage
                     .clone_snapshot(&job.prebuild_snapshot_id, &d)
                     .context("fork prebuild")?;
             }
-            d
-        };
+            Ok(d)
+        })?;
         disks.push(job_disk.clone());
 
         // Sticky volumes: clone-then-promote, so two jobs never write the
         // same volume and an untrusted job can never poison it.
         let mut sticky = Vec::new();
-        for v in &volumes {
-            let clone = storage::sticky_clone(&job.job_id, &v.key);
-            if v.source_snapshot_id.is_empty() {
-                self.storage.create_empty(&clone, EMPTY_DISK_GB)?;
-            } else {
-                self.storage.clone_snapshot(&v.source_snapshot_id, &clone)?;
+        crate::timeline::span("sticky_volumes", || -> Result<()> {
+            crate::timeline::attr("count", volumes.len().to_string());
+            for v in &volumes {
+                let clone = storage::sticky_clone(&job.job_id, &v.key);
+                if v.source_snapshot_id.is_empty() {
+                    self.storage.create_empty(&clone, EMPTY_DISK_GB)?;
+                } else {
+                    self.storage.clone_snapshot(&v.source_snapshot_id, &clone)?;
+                }
+                disks.push(clone.clone());
+                sticky.push((v, clone));
             }
-            disks.push(clone.clone());
-            sticky.push((v, clone));
-        }
+            Ok(())
+        })?;
 
         // Cancelled while forking disks: don't start a VM at all.
         if cancel_requested(slot) {
@@ -377,14 +395,18 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             return Ok(());
         }
 
-        let mut vm = self.take_vm(&image, job.vcpu, job.memory_gb)?;
+        let mut vm =
+            crate::timeline::span("take_vm", || self.take_vm(&image, job.vcpu, job.memory_gb))?;
         let mut guest_failure = String::new();
         let run = (|| -> Result<pb::job_result::Outcome> {
-            self.hv.set_cpu_weight(&mut vm, job.cpu_weight.max(1))?;
-            self.hv
-                .set_egress(&mut vm, &EgressPolicy::for_job(job))
-                .context("apply egress policy")?;
-            self.hv.resume(&mut vm)?;
+            crate::timeline::span("set_cpu_weight", || {
+                self.hv.set_cpu_weight(&mut vm, job.cpu_weight.max(1))
+            })?;
+            crate::timeline::span("set_egress", || {
+                self.hv.set_egress(&mut vm, &EgressPolicy::for_job(job))
+            })
+            .context("apply egress policy")?;
+            crate::timeline::span("resume", || self.hv.resume(&mut vm))?;
             events(pb::Phase::VmResumed);
 
             let mut payload = GuestPayload {
@@ -392,24 +414,28 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                 root: Some(rootfs::guest_root(&job.base_image)),
                 ..Default::default()
             };
-            self.hv.attach_disk(
-                &mut vm,
-                rootfs::UPPER_SERIAL,
-                &self.storage.device_path(&job_disk),
-            )?;
-            payload.disks.push(GuestDisk {
-                serial: rootfs::UPPER_SERIAL.into(),
-                mount: "/".into(),
-            });
-            for (v, clone) in &sticky {
-                let serial = format!("sticky-{}", storage::sanitize(&v.key));
-                self.hv
-                    .attach_disk(&mut vm, &serial, &self.storage.device_path(clone))?;
+            crate::timeline::span("attach_disks", || -> Result<()> {
+                crate::timeline::attr("count", (1 + sticky.len()).to_string());
+                self.hv.attach_disk(
+                    &mut vm,
+                    rootfs::UPPER_SERIAL,
+                    &self.storage.device_path(&job_disk),
+                )?;
                 payload.disks.push(GuestDisk {
-                    serial,
-                    mount: v.mount.clone(),
+                    serial: rootfs::UPPER_SERIAL.into(),
+                    mount: "/".into(),
                 });
-            }
+                for (v, clone) in &sticky {
+                    let serial = format!("sticky-{}", storage::sanitize(&v.key));
+                    self.hv
+                        .attach_disk(&mut vm, &serial, &self.storage.device_path(clone))?;
+                    payload.disks.push(GuestDisk {
+                        serial,
+                        mount: v.mount.clone(),
+                    });
+                }
+                Ok(())
+            })?;
             if let Some(g) = &job.guest {
                 payload.set_runner_config(&g.runner_config);
                 payload.env = g.env.clone().into_iter().collect();
@@ -434,7 +460,10 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             if cancel_requested(slot) {
                 return Ok(pb::job_result::Outcome::Cancelled);
             }
-            self.hv.send_payload(&mut vm, &payload)?;
+            crate::timeline::span("send_payload", || self.hv.send_payload(&mut vm, &payload))?;
+            // The guest times its own steps from the payload's arrival; this
+            // host instant anchors them (vsock is local, so arrival is now).
+            let anchor = SystemTime::now();
 
             // From here a cancel reaches the guest. Registering and checking
             // under one lock means a cancel racing with this is never lost.
@@ -448,7 +477,12 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                 self.stop_guest(&job.job_id, stop);
             }
 
-            let waited = self.hv.wait(&mut vm, JOB_DEADLINE);
+            let waited = crate::timeline::span("guest_run", || self.hv.wait(&mut vm, JOB_DEADLINE));
+            if let Ok(g) = &waited {
+                for s in g.anchored_spans(anchor) {
+                    crate::timeline::push(s);
+                }
+            }
             // The guest stopped (or was cut off) because of a cancel: the
             // job did not fail on its own.
             if cancel_requested(slot) {
@@ -470,10 +504,10 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
             })
         })();
 
-        let usage = self.hv.usage(&vm);
+        let usage = crate::timeline::span("usage", || self.hv.usage(&vm));
         result.avg_busy_vcpu = usage.avg_busy_vcpu;
         result.peak_memory_gb = usage.peak_memory_gb;
-        self.hv.destroy(vm).context("destroy VM")?;
+        crate::timeline::span("destroy", || self.hv.destroy(vm)).context("destroy VM")?;
         events(pb::Phase::VmDestroyed);
 
         let outcome = run?;
@@ -596,6 +630,78 @@ mod tests {
         assert_eq!(p.disks.len(), 2);
         assert_eq!(p.env["GOPROXY"], "http://m");
         assert_eq!(a.hv.destroyed.lock().unwrap().len(), 1);
+    }
+
+    /// perf-only: a job's result carries its host steps in order, each
+    /// lifecycle step at depth 0, and the guest's steps anchored after the
+    /// payload was sent.
+    #[test]
+    fn result_carries_the_job_timeline() {
+        use crate::hypervisor::GuestSpan;
+        let hv = FakeHypervisor {
+            guest_timeline: vec![GuestSpan {
+                name: "mount_disks".into(),
+                start_ms: 0.0,
+                dur_ms: 5.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let a = agent(hv, seeded());
+        let r = a.run_job(&job(pb::Trust::Trusted), &|_| {});
+        assert_eq!(r.outcome(), Outcome::Succeeded, "{}", r.error);
+        let top: Vec<_> = r
+            .spans
+            .iter()
+            .filter(|s| s.component == "host" && s.depth == 0)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            top,
+            vec![
+                "check_image",
+                "job_disk",
+                "sticky_volumes",
+                "take_vm",
+                "set_cpu_weight",
+                "set_egress",
+                "resume",
+                "attach_disks",
+                "send_payload",
+                "guest_run",
+                "usage",
+                "destroy",
+                "discard_disk",
+            ]
+        );
+        let by = |n: &str| r.spans.iter().find(|s| s.name == n).unwrap();
+        assert_eq!(by("take_vm").attrs["warm"], "miss");
+        assert_eq!(by("job_disk").attrs["source"], "prebuild_clone");
+        let g = by("guest.mount_disks");
+        assert_eq!(g.component, "guest");
+        let ts = |s: &pb::TimelineSpan| s.start.unwrap();
+        let after = |a: prost_types::Timestamp, b: prost_types::Timestamp| {
+            (a.seconds, a.nanos) >= (b.seconds, b.nanos)
+        };
+        assert!(
+            after(ts(g), ts(by("send_payload"))),
+            "guest spans start after the payload"
+        );
+        // Each span's start is on or after the previous one's.
+        for w in r
+            .spans
+            .iter()
+            .filter(|s| s.component == "host")
+            .collect::<Vec<_>>()
+            .windows(2)
+        {
+            assert!(
+                after(ts(w[1]), ts(w[0])),
+                "{} before {}",
+                w[1].name,
+                w[0].name
+            );
+        }
     }
 
     #[test]

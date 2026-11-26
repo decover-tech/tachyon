@@ -85,6 +85,20 @@ type Agent struct {
 	// Output receives runner and warm-step output (the serial console).
 	Output io.Writer
 	Now    func() time.Time
+
+	// TimelineNow is the clock for the perf-only timeline (default
+	// time.Now). Separate from Now so timing a step never shifts the
+	// phase timestamps Now produces.
+	TimelineNow func() time.Time
+
+	tl *timeline // perf-only: this job's steps
+}
+
+func (a *Agent) timelineNow() time.Time {
+	if a.TimelineNow != nil {
+		return a.TimelineNow()
+	}
+	return time.Now()
 }
 
 // quiesceTimeout bounds how long Serve waits for the job's processes to
@@ -111,7 +125,9 @@ func (a *Agent) Serve(ctx context.Context, conn io.ReadWriter) error {
 		return err
 	}
 	res := a.Run(ctx, p)
-	if err := a.quiesce(ctx); err != nil {
+	qerr := a.tl.span("quiesce", nil, func() error { return a.quiesce(ctx) })
+	res.Timeline = a.tl.snapshot()
+	if err := qerr; err != nil {
 		a.log().Error("quiesce disks", "job", p.JobID, "err", err)
 		res.ExitCode = ExitAgentError
 	}
@@ -125,7 +141,9 @@ func (a *Agent) Serve(ctx context.Context, conn io.ReadWriter) error {
 // steps for a prebuild build. It never returns the runner config in errors
 // or logs.
 func (a *Agent) Run(ctx context.Context, p *Payload) Result {
-	res := Result{Phases: map[string]string{}}
+	received := a.timelineNow()
+	a.tl = newTimeline(received, a.timelineNow)
+	res := Result{Phases: map[string]string{}, ReceivedUnixMS: float64(received.UnixNano()) / 1e6}
 	a.log().Info("payload received", "payload", p.String())
 	code, err := a.run(ctx, p, &res)
 	if err != nil {
@@ -135,26 +153,39 @@ func (a *Agent) Run(ctx context.Context, p *Payload) Result {
 		}
 	}
 	res.ExitCode = code
+	res.Timeline = a.tl.snapshot()
 	a.log().Info("job done", "job", p.JobID, "exit_code", code)
 	return res
 }
 
 func (a *Agent) run(ctx context.Context, p *Payload, res *Result) (int, error) {
-	if err := a.mountDisks(ctx, p.Disks); err != nil {
+	if err := a.tl.span("mount_disks", map[string]string{"count": strconv.Itoa(len(p.Disks))},
+		func() error { return a.mountDisks(ctx, p.Disks) }); err != nil {
 		return 0, fmt.Errorf("mount disks: %w", err)
 	}
-	if err := a.writeFiles(p.Files); err != nil {
+	if err := a.tl.span("write_files", map[string]string{"count": strconv.Itoa(len(p.Files))},
+		func() error { return a.writeFiles(p.Files) }); err != nil {
 		return 0, fmt.Errorf("write files: %w", err)
 	}
 	env := a.env(p.Env)
-	a.startDocker(ctx)
+	a.tl.span("start_docker", nil, func() error { a.startDocker(ctx); return nil })
 	if p.Prebuild != nil {
-		return a.prebuild(ctx, p, env, res)
+		var code int
+		err := a.tl.span("prebuild", nil, func() (err error) {
+			code, err = a.prebuild(ctx, p, env, res)
+			return err
+		})
+		return code, err
 	}
-	if err := a.stashWarmPaths(p.Env); err != nil {
+	if err := a.tl.span("stash_warm_paths", nil, func() error { return a.stashWarmPaths(p.Env) }); err != nil {
 		return 0, fmt.Errorf("stash warm paths: %w", err)
 	}
-	return a.runRunner(ctx, p, env, res)
+	var code int
+	err := a.tl.span("runner", nil, func() (err error) {
+		code, err = a.runRunner(ctx, p, env, res)
+		return err
+	})
+	return code, err
 }
 
 // startDocker starts dockerd as root inside the job's root, where
@@ -539,6 +570,7 @@ func (a *Agent) runRunner(ctx context.Context, p *Payload, env []string, res *Re
 	// never written to the guest disk (which may become a sticky volume or
 	// be inspected after the job).
 	w := newPhaseWatcher(a.output(), a.now)
+	w.tnow = a.timelineNow
 	code, err := a.Sys.Run(ctx, Command{
 		Path:   a.Layout.RunnerCmd,
 		Args:   []string{"--jitconfig", string(cfg)},
@@ -553,6 +585,12 @@ func (a *Agent) runRunner(ctx context.Context, p *Payload, env []string, res *Re
 	w.Flush()
 	for k, v := range w.Phases() {
 		res.Phases[k] = v
+	}
+	times := w.PhaseTimes()
+	for _, ph := range []string{PhaseRunnerOnline, PhaseJobStarted} {
+		if t, ok := times[ph]; ok {
+			a.tl.mark(ph, t)
+		}
 	}
 	if err != nil {
 		return 0, fmt.Errorf("start runner: %w", err)
@@ -585,20 +623,25 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 	}
 	code := 0
 	var last *tailWriter
-	step := func(stepEnv []string, c string) (int, error) {
+	// kind and i name the step's span (perf-only): clone_step or warm_step.
+	step := func(kind string, i int, stepEnv []string, c string) (exit int, err error) {
 		last = &tailWriter{max: failureTail}
 		out := io.MultiWriter(a.output(), last)
-		return a.Sys.Run(ctx, Command{
-			Path:   l.Shell,
-			Args:   []string{"-euo", "pipefail", "-c", c},
-			Env:    stepEnv,
-			Dir:    ws,
-			Root:   l.Root,
-			UID:    l.UID,
-			GID:    l.GID,
-			Stdout: out,
-			Stderr: out,
+		err = a.tl.span(kind, map[string]string{"step": strconv.Itoa(i + 1)}, func() (err error) {
+			exit, err = a.Sys.Run(ctx, Command{
+				Path:   l.Shell,
+				Args:   []string{"-euo", "pipefail", "-c", c},
+				Env:    stepEnv,
+				Dir:    ws,
+				Root:   l.Root,
+				UID:    l.UID,
+				GID:    l.GID,
+				Stdout: out,
+				Stderr: out,
+			})
+			return err
 		})
+		return exit, err
 	}
 	// The clone token is visible to the clone commands only.
 	var cloneToken []byte
@@ -611,7 +654,7 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		cloneEnv := append(append([]string(nil), env...), "TACHYON_CLONE_TOKEN="+string(tok))
 		for i, c := range pb.CloneCommands {
 			a.log().Info("clone step", "step", i+1, "of", len(pb.CloneCommands), "refresh", pb.Refresh)
-			exit, err := step(cloneEnv, c)
+			exit, err := step("clone_step", i, cloneEnv, c)
 			if err != nil {
 				return 0, fmt.Errorf("clone step %d: %w", i+1, err)
 			}
@@ -628,7 +671,7 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 			break // the clone failed; nothing to warm
 		}
 		a.log().Info("warm step", "step", i+1, "of", len(pb.WarmCommands))
-		exit, err := step(env, c)
+		exit, err := step("warm_step", i, env, c)
 		if err != nil {
 			return 0, fmt.Errorf("warm step %d: %w", i+1, err)
 		}
@@ -660,7 +703,7 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 	// nothing changes the layer while it is scrubbed and scanned. Then scrub
 	// known credential files and scan whatever is left. Removing through the
 	// overlay leaves whiteouts, so the files are gone from the snapshot too.
-	a.Sys.StopProcesses(ctx, []string{l.Root, l.JobMount})
+	a.tl.span("stop_processes", nil, func() error { a.Sys.StopProcesses(ctx, []string{l.Root, l.JobMount}); return nil })
 	for _, s := range pb.ScrubPaths {
 		gp, err := a.guestPath(s, true)
 		if err != nil {
@@ -677,7 +720,11 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 	if len(cloneToken) > 0 {
 		literals = append(literals, cloneToken)
 	}
-	findings, err := ScanSecrets(filepath.Join(l.JobMount, "upper"), literals)
+	var findings []Finding
+	err := a.tl.span("secret_scan", nil, func() (err error) {
+		findings, err = ScanSecrets(filepath.Join(l.JobMount, "upper"), literals)
+		return err
+	})
 	clean := err == nil && len(findings) == 0
 	if err != nil {
 		a.log().Error("secret scan", "err", err)

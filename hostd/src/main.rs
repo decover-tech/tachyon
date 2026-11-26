@@ -18,6 +18,7 @@ pub mod replicate;
 pub mod rootfs;
 pub mod storage;
 pub mod telemetry;
+pub mod timeline;
 pub mod tls;
 pub mod usage;
 

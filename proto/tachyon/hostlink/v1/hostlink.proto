@@ -11,6 +11,7 @@ package tachyon.hostlink.v1;
 
 option go_package = "github.com/decover-tech/tachyon/gen/hostlink/v1;hostlinkv1";
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 
 service HostLinkService {
@@ -84,6 +85,8 @@ enum Phase {
   PHASE_JOB_STARTED = 4;
   PHASE_JOB_FINISHED = 5;
   PHASE_VM_DESTROYED = 6;
+  // perf-only: hostd received the AssignJob (host clock).
+  PHASE_HOST_RECEIVED = 7;
 }
 
 message JobEvent {
@@ -113,6 +116,20 @@ message JobResult {
   // Echoed from AssignJob so a new prebuild records what it was built on.
   string base_image = 8;
   string commit = 9;
+  // perf-only: where the job's time went on the host and in the guest.
+  repeated TimelineSpan spans = 10;
+}
+
+// perf-only: one timed step of a job. Host spans are timed on the host;
+// guest spans are timed in the guest relative to the payload's arrival and
+// anchored on the host clock, so the guest's wall clock never matters.
+message TimelineSpan {
+  string component = 1; // host | guest
+  string name = 2;      // e.g. take_vm, exec zfs clone, guest.mount_disks
+  google.protobuf.Timestamp start = 3;
+  google.protobuf.Duration duration = 4;
+  uint32 depth = 5; // nesting level; 0 = a top-level step
+  map<string, string> attrs = 6;
 }
 
 // A periodic resource sample for one running job, used for abuse detection

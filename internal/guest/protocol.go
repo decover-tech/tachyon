@@ -75,6 +75,11 @@ type Result struct {
 	// Failure names a failed prebuild step and ends with its last output, so
 	// the failure is visible without the guest console.
 	Failure string `json:"failure,omitempty"`
+	// perf-only: the agent's steps, relative to the payload's arrival.
+	Timeline []TimelineSpan `json:"timeline,omitempty"`
+	// perf-only: the guest's wall clock at the payload's arrival, Unix
+	// milliseconds, so hostd can measure the guest's clock skew.
+	ReceivedUnixMS float64 `json:"received_unix_ms,omitempty"`
 }
 
 // Phase names reported in Result.Phases.
