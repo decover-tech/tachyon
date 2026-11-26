@@ -54,8 +54,9 @@ var secretRules = []secretRule{
 	{"npm-token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), markers("npm_"), nil},
 	{"slack-token", regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`), markers("xox"), nil},
 	// A key, not just its header: PEM/PGP parsers (rustls, pem, cargo)
-	// contain the header line as a string constant.
-	{"private-key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----\r?\n(?:[A-Za-z-]+: [^\r\n]*\r?\n)*(?:\r?\n)?[A-Za-z0-9+/=]{60}`), markers("-----BEGIN "), nil},
+	// contain the header line as a string constant. Any body line of 16+
+	// base64 characters counts, so keys wrapped narrower than 64 are seen.
+	{"private-key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----\r?\n(?:[A-Za-z-]+: [^\r\n]*\r?\n)*(?:\r?\n)?[A-Za-z0-9+/=]{16,}\r?\n`), markers("-----BEGIN "), nil},
 }
 
 // registryDirs hold packages downloaded from public registries, whose docs

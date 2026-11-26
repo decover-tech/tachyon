@@ -126,6 +126,7 @@ func TestScanSecretsIgnoresSamplesAndBareHeaders(t *testing.T) {
 	files := map[string]string{
 		"faults.py":      `key = "AKIAIOSFODNN7EXAMPLE"`,
 		"librustls.rlib": "\x00-----BEGIN PRIVATE KEY-----\x00-----END PRIVATE KEY-----",
+		"narrow.pem":     "-----BEGIN PRIVATE KEY-----\n" + strings.Repeat("MIIEvQIBADANBgkqhkiG\n", 4) + "-----END PRIVATE KEY-----\n",
 		"pgp.asc":        "-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: x\n\n" + strings.Repeat("lQOYBF", 12) + "\n",
 	}
 	for name, body := range files {
@@ -137,7 +138,7 @@ func TestScanSecretsIgnoresSamplesAndBareHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []Finding{{Path: "/pgp.asc", Rule: "private-key"}}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("findings = %v, want only the armored PGP key", got)
+	if want := []Finding{{Path: "/narrow.pem", Rule: "private-key"}, {Path: "/pgp.asc", Rule: "private-key"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings = %v, want only the real keys", got)
 	}
 }
