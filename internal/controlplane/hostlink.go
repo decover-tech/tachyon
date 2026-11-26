@@ -25,11 +25,14 @@ type hostConn struct {
 	arch          string
 	failureDomain string
 	peerAddr      string
-	out           chan *hostlinkv1.LinkResponse
-	snaps         []*hostlinkv1.SnapshotRef
-	draining      bool
-	hb            *hostlinkv1.Heartbeat // latest, for host metrics
-	closed        chan struct{}
+	// Reported in Hello; shown by the admin API for canary rollouts.
+	version  string
+	group    string
+	out      chan *hostlinkv1.LinkResponse
+	snaps    []*hostlinkv1.SnapshotRef
+	draining bool
+	hb       *hostlinkv1.Heartbeat // latest, for host metrics
+	closed   chan struct{}
 	// Last host view written to Core.Store; guarded by Core.mu.
 	saved      *scheduler.Host
 	savedRatio float64
@@ -93,6 +96,8 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 		arch:          hello.GetArch(),
 		failureDomain: hello.GetFailureDomain(),
 		peerAddr:      hello.GetPeerAddress(),
+		version:       hello.GetHostdVersion(),
+		group:         hello.GetHostGroup(),
 		out:           make(chan *hostlinkv1.LinkResponse, 64),
 		closed:        make(chan struct{}),
 	}
@@ -102,8 +107,13 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 		close(old.closed)
 	}
 	c.hosts[hc.id] = hc
+	// An operator drain outlives the stream: a host restarting for an
+	// upgrade reconnects drained and stays drained until undrained.
+	wantDrain := c.drainWanted[hc.id]
+	c.meta[hc.id] = hostMeta{version: hc.version, group: hc.group}
+	hc.draining = wantDrain
 	c.mu.Unlock()
-	c.log().Info("host connected", "host", hc.id, "region", hc.region)
+	c.log().Info("host connected", "host", hc.id, "region", hc.region, "version", hc.version, "group", hc.group, "drain", wantDrain)
 
 	helloHost := scheduler.Host{
 		ID:            hc.id,
@@ -112,9 +122,15 @@ func (s *HostLink) Link(stream hostlinkv1.HostLinkService_LinkServer) error {
 		Arch:          jobapi.Arch(hello.GetArch()),
 		VCPU:          int(hello.GetVcpu()),
 		MemGB:         int(hello.GetMemoryGb()),
+		Draining:      wantDrain,
 	}
 	c.Scheduler.UpsertHost(helloHost)
 	c.saveHost(context.Background(), hc, helloHost)
+
+	if wantDrain {
+		// Queued before the sender starts; hc.out is buffered.
+		hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Drain{Drain: &hostlinkv1.Drain{Drain: true}}})
+	}
 
 	sendErr := make(chan error, 1)
 	go func() {
@@ -202,12 +218,17 @@ func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostli
 			images = append(images, ref.GetKey())
 		}
 	}
+	// A host drains if either side says so: the operator (admin API) or
+	// hostd itself.
+	c.mu.Lock()
+	draining := hb.GetDraining() || c.drainWanted[hc.id]
+	c.mu.Unlock()
 	if ir, ok := c.Images.(ImageRollout); ok {
-		ir.ObserveHost(hc.id, images, hb.GetDraining())
+		ir.ObserveHost(hc.id, images, draining)
 	}
 	c.mu.Lock()
 	hc.snaps = hb.GetSnapshots()
-	hc.draining = hb.GetDraining()
+	hc.draining = draining
 	hc.hb = hb
 	c.mu.Unlock()
 	h := scheduler.Host{
@@ -218,7 +239,7 @@ func (s *HostLink) onHeartbeat(hc *hostConn, hello *hostlinkv1.Hello, hb *hostli
 		VCPU:          int(hello.GetVcpu()),
 		MemGB:         int(hello.GetMemoryGb()),
 		Snapshots:     repos,
-		Draining:      hb.GetDraining(),
+		Draining:      draining,
 	}
 	c.Scheduler.UpsertHost(h)
 	c.saveHost(context.Background(), hc, h)

@@ -1,0 +1,21 @@
+# Example dnsmasq DHCP/TFTP config that chain-loads iPXE and then hands over
+# to entry.ipxe. Adapted from the iPXE "Chainloading" and dnsmasq docs.
+# NOT TESTED. Use it only on a provisioning network you control.
+
+interface=PROVISIONING_NIC
+dhcp-range=192.0.2.100,192.0.2.200,12h
+
+enable-tftp
+tftp-root=/srv/tftp   # holds undionly.kpxe (BIOS) and snponly.efi (UEFI) from iPXE
+
+# iPXE identifies itself with DHCP option 175.
+dhcp-match=set:ipxe,175
+# UEFI x86-64 clients send architecture 7 (or 9).
+dhcp-match=set:efi64,option:client-arch,7
+dhcp-match=set:efi64,option:client-arch,9
+
+# Firmware PXE ROM: give it iPXE.
+dhcp-boot=tag:!ipxe,tag:!efi64,undionly.kpxe
+dhcp-boot=tag:!ipxe,tag:efi64,snponly.efi
+# iPXE itself: give it the entry script, over HTTPS.
+dhcp-boot=tag:ipxe,https://boot.example.invalid/tachyon/entry.ipxe

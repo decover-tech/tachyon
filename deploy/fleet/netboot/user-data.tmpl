@@ -1,0 +1,42 @@
+#cloud-config
+# Ubuntu autoinstall for ${HOST_ID}. Installs the OS on ONE disk, chosen by
+# serial; every other disk, including the NVMe devices for ZFS, is left
+# untouched (the bootstrap script wipes those only with ZFS_CONFIRM_WIPE=yes).
+# After the first boot it runs the bootstrap script, which stops before
+# starting hostd until the host certificate and base snapshots exist.
+# NOT TESTED on hardware.
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard: {layout: us}
+  storage:
+    layout:
+      name: direct
+      match:
+        serial: "${OS_DISK_SERIAL}"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - "${SSH_AUTHORIZED_KEY}"
+  user-data:
+    hostname: ${HOST_ID}
+    disable_root: true
+    users:
+      - name: tachyon-ops
+        lock_passwd: true
+        sudo: "ALL=(ALL) NOPASSWD:ALL"
+        ssh_authorized_keys:
+          - "${SSH_AUTHORIZED_KEY}"
+    write_files:
+      - path: /etc/tachyon/fleet.conf
+        permissions: "0600"
+        owner: root:root
+        content: |
+${FLEET_CONF_INDENTED}
+    runcmd:
+      - curl -fsSL --retry 3 -o /usr/local/sbin/tachyon-host-bootstrap.sh "${BOOTSTRAP_URL}"
+      - echo "${BOOTSTRAP_SHA256}  /usr/local/sbin/tachyon-host-bootstrap.sh" | sha256sum -c -
+      - chmod 0755 /usr/local/sbin/tachyon-host-bootstrap.sh
+      - /usr/local/sbin/tachyon-host-bootstrap.sh -c /etc/tachyon/fleet.conf all || true
+  shutdown: reboot

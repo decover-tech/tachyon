@@ -1,0 +1,53 @@
+# Per-host config for tachyon-host-bootstrap.sh. Shell syntax, read as root:
+# keep it root-owned and mode 0600/0640. Copy to /etc/tachyon/fleet.conf.
+# Contains no secrets; certificate keys are never put here.
+
+# ---- identity (HOST_ID is the host certificate identity) ----
+HOST_ID=fra-01
+REGION=eu-central
+FAILURE_DOMAIN=rack-a      # rack / power / switch; spread replicas across these
+HOST_GROUP=canary          # canary | stable | any label you roll out by
+
+# ---- control plane ----
+CONTROL_PLANE=https://cp.internal:9090
+#TLS_SERVER_NAME=          # only if it differs from the host in CONTROL_PLANE
+TRUST_DOMAIN=tachyon       # must match the control plane's -hostlink-trust-domain
+# Directory holding host.crt, host.key, ca.crt placed by the provisioning
+# system (see docs/hostlink-mtls.md). Or leave unset, run the "csr" step, have
+# the issuer sign host.csr, and run the "tls" step.
+#TLS_SOURCE_DIR=/root/tachyon-tls
+
+# ---- sizing (autodetected on the host when unset) ----
+#VCPU=64
+#MEMORY_GB=240
+RESERVE_MEMORY_GB=8        # host + ZFS ARC headroom when MEMORY_GB is autodetected
+WARM=2:2,4:2,8:1           # vcpu:count paused VMs; one base snapshot dir per size
+
+# ---- storage ----
+ZFS_POOL=tank/tachyon      # pool/dataset; hostd creates zvols under it
+# Needed only when the pool does not exist yet. Creating it ERASES these.
+ZFS_DEVICES="/dev/disk/by-id/nvme-EXAMPLE_1 /dev/disk/by-id/nvme-EXAMPLE_2"
+ZFS_LAYOUT=                # empty = stripe; "mirror" for a mirror
+ZFS_CONFIRM_WIPE=no        # set to yes to allow zpool create
+ZFS_ARC_MAX_GB=4
+# <dir>/<vcpu>/ per warm size; `tachyon-hostd prepare-image` leaves them in
+# <IMAGES>/<name@version>/snapshots/<vcpu>/
+BASE_SNAPSHOTS=/var/lib/tachyon/base/ubuntu-24.04@2026-11-16/snapshots
+IMAGES=/var/lib/tachyon/base                     # base image store (prepare-image)
+#IMAGE_TRUST_SOURCE=/root/image-trust.pem
+
+# ---- artifacts: URL (https only) or local path, with a mandatory SHA-256 ----
+CH_SOURCE=https://example.invalid/cloud-hypervisor
+CH_SHA256=
+CH_REMOTE_SOURCE=https://example.invalid/ch-remote
+CH_REMOTE_SHA256=
+HOSTD_VERSION=0.1.0        # same string hostd reports (its Cargo version)
+HOSTD_SOURCE=https://example.invalid/tachyon-hostd-0.1.0
+HOSTD_SHA256=
+
+# ---- network and observability (optional) ----
+#EGRESS_MBIT=1000
+#MIRRORS=mirror.internal
+#DNS=10.0.0.2
+#PEER_ADDRESS=http://fra-01.internal:7443   # unset = no snapshot pulls, no peer port
+#OTLP_ENDPOINT=http://otel-collector:4317

@@ -93,6 +93,7 @@ async fn main() -> Result<()> {
         vcpu: env("TACHYON_VCPU")?.parse()?,
         memory_gb: env("TACHYON_MEMORY_GB")?.parse()?,
         peer_address: env_or("TACHYON_PEER_ADDRESS", ""),
+        host_group: env_or("TACHYON_HOST_GROUP", ""),
     };
     let run_dir: PathBuf = env_or("TACHYON_RUN_DIR", "/run/tachyon/vms").into();
     let net = network::HostNetwork {

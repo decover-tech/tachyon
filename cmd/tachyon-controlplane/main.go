@@ -87,12 +87,18 @@ func main() {
 	priceOwned := flag.Float64("price-owned-vcpu-hour", 0, "owned capacity cost per vCPU-hour, for cost per job-minute")
 	priceBurst := flag.Float64("price-burst-vcpu-hour", 0, "burst capacity cost per vCPU-hour, for cost per job-minute")
 	unknownPlan := flag.String("unknown-tenant-plan", "paid", "plan assumed for tenants with no account record (free, trial, paid; empty refuses them)")
+	adminAddr := flag.String("admin-addr", "", "operator API listen address (host drain/undrain, host list); needs -admin-token-file; off when empty. Bind it to a private interface or 127.0.0.1")
+	adminTokenFile := flag.String("admin-token-file", "", "file holding the operator API bearer token (at least 32 bytes); never logged")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	secret := os.Getenv("TACHYON_GITHUB_WEBHOOK_SECRET")
 	if secret == "" || *appID == 0 || *keyFile == "" {
 		log.Error("need TACHYON_GITHUB_WEBHOOK_SECRET, -github-app-id and -github-app-key")
+		os.Exit(2)
+	}
+	if (*adminAddr == "") != (*adminTokenFile == "") {
+		log.Error("-admin-addr and -admin-token-file must be set together; the operator API is off without a credential")
 		os.Exit(2)
 	}
 	pem, err := os.ReadFile(*keyFile)
@@ -316,6 +322,23 @@ func main() {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok\n")) })
 	httpSrv := &http.Server{Addr: *httpAddr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 
+	// The operator API gets its own listener and is never mounted on the
+	// webhook mux above.
+	var adminSrv *http.Server
+	if *adminAddr != "" {
+		token, err := controlplane.LoadAdminToken(*adminTokenFile)
+		if err != nil {
+			log.Error("admin token", "err", err)
+			os.Exit(2)
+		}
+		h, err := controlplane.AdminHandler(core, token)
+		if err != nil {
+			log.Error("admin api", "err", err)
+			os.Exit(2)
+		}
+		adminSrv = &http.Server{Addr: *adminAddr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	}
+
 	link := &controlplane.HostLink{Core: core}
 	var grpcOpts []grpc.ServerOption
 	if *insecureLink {
@@ -377,12 +400,23 @@ func main() {
 			log.Error("http", "err", err)
 		}
 	}()
+	if adminSrv != nil {
+		go func() {
+			if err := adminSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("admin http", "err", err)
+			}
+		}()
+		log.Warn("operator API enabled (plain HTTP; keep it on a private interface or behind TLS)", "admin", *adminAddr)
+	}
 	log.Info("control plane up", "http", *httpAddr, "grpc", *grpcAddr)
 
 	<-ctx.Done()
 	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdown)
+	if adminSrv != nil {
+		_ = adminSrv.Shutdown(shutdown)
+	}
 	grpcSrv.GracefulStop()
 }
 

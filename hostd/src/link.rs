@@ -31,6 +31,8 @@ pub struct HostInfo {
     /// Advertised address of this host's peer snapshot service; empty if
     /// it serves no pulls.
     pub peer_address: String,
+    /// Operator-assigned fleet group (e.g. "canary"); empty if ungrouped.
+    pub host_group: String,
 }
 
 /// Snapshot replication state shared by the link and the peer server.
@@ -128,6 +130,7 @@ where
             hostd_version: env!("CARGO_PKG_VERSION").into(),
             running_job_ids: running,
             peer_address: self.info.peer_address.clone(),
+            host_group: self.info.host_group.clone(),
         })))
         .await?;
         let mut inbound = client.link(ReceiverStream::new(rx)).await?.into_inner();
@@ -414,6 +417,7 @@ mod tests {
                 vcpu: 4,
                 memory_gb: 16,
                 peer_address: String::new(),
+                host_group: String::new(),
             },
             "http://127.0.0.1:1".into(),
         );
