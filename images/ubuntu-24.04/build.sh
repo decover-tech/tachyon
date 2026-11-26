@@ -96,6 +96,7 @@ bind -t sysfs sys "$root/sys"
 bind --bind /dev "$root/dev"
 bind -t devpts devpts "$root/dev/pts"
 bind -t tmpfs tmpfs "$root/run"
+rm -f "$root/etc/resolv.conf"
 cp -L /etc/resolv.conf "$root/etc/resolv.conf"
 # No services start inside the chroot.
 printf '#!/bin/sh\nexit 101\n' >"$root/usr/sbin/policy-rc.d"
@@ -151,6 +152,15 @@ rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 	"$root"/tmp/* "$root"/var/tmp/* "$root"/root/.cache "$root"/home/runner/.cache
 : >"$root/etc/machine-id"
 : >"$root/etc/resolv.conf"
+# Guest agent and its boot config. After the resets above so rootfs/ can
+# ship files (resolv.conf) that they would otherwise empty.
+# The agent must be in the image: hostd boots it before taking the snapshot.
+if [[ -n ${GUEST_BIN:-} ]]; then
+	install -D -m 0755 "$GUEST_BIN" "$root/usr/local/bin/tachyon-guest"
+fi
+if [[ -d $here/rootfs ]]; then
+	cp -a "$here/rootfs/." "$root/"
+fi
 find "$root" -xdev -newermt "@$SOURCE_DATE_EPOCH" -print0 |
 	xargs -0r touch --no-dereference --date="@$SOURCE_DATE_EPOCH"
 
