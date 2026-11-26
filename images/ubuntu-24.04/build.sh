@@ -91,6 +91,8 @@ git -C "$ri" checkout -q FETCH_HEAD
 
 curl -fsSL --retry 3 -o "$work/base.tar.xz" "$BASE_ROOTFS_URL"
 echo "$BASE_ROOTFS_SHA256  $work/base.tar.xz" | sha256sum -c --quiet -
+curl -fsSL --retry 3 -o "$work/actions-runner.tar.gz" "$ACTIONS_RUNNER_URL"
+echo "$ACTIONS_RUNNER_SHA256  $work/actions-runner.tar.gz" | sha256sum -c --quiet -
 
 
 # ---- 2. Build plan: upstream template minus image.yml's trims ---------------
@@ -245,6 +247,10 @@ rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 # ship files (resolv.conf) that they would otherwise empty.
 # The agent must be in the image: hostd boots it before taking the snapshot.
 install -D -m 0755 "$GUEST_BIN" "$root/usr/local/bin/tachyon-guest"
+# The agent runs the runner as uid 1001 from here (internal/guest Layout).
+install -d -o 1001 -g 1001 "$root/home/runner/actions-runner"
+tar -xzf "$work/actions-runner.tar.gz" -C "$root/home/runner/actions-runner" --no-same-owner
+chown -R 1001:1001 "$root/home/runner/actions-runner"
 if [[ -d $here/rootfs ]]; then
 	cp -a "$here/rootfs/." "$root/"
 fi

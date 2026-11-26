@@ -292,6 +292,9 @@ runner_images:
 base_rootfs:
   url: https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-amd64-root.tar.xz
   sha256: ec6972af8ea2bd05c55299d204e5ae3f91769b84cfaec7395639d236a39f9a03
+actions_runner:
+  url: https://github.com/actions/runner/releases/download/v2.338.2/actions-runner-linux-x64-2.338.2.tar.gz
+  sha256: baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
 rootfs_size_gb: 64
 vars:
   helper_script_folder: /imagegeneration/helpers
