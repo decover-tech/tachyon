@@ -311,7 +311,7 @@ where
             }
             running.lock().unwrap().remove(&job_id);
             metrics.job_finished(job.vcpu, result.outcome());
-            tracing::info!(job = %job_id, outcome = ?result.outcome(), "finished");
+            tracing::info!(job = %job_id, outcome = ?result.outcome(), error = %result.error, "finished");
             // Kept until acked, across reconnects and restarts.
             outbox.push(pb::link_request::Msg::JobResult(result));
             outbox.mark_done(&job_id);
