@@ -340,7 +340,10 @@ impl Hypervisor for CloudHypervisor {
             vm,
             &[
                 "add-disk",
-                &format!("path={IN_JAIL_DIR}/disk-{serial},serial={serial},id={serial}"),
+                // Cloud Hypervisor v55+ rejects a disk without an image type.
+                &format!(
+                    "path={IN_JAIL_DIR}/disk-{serial},image_type=raw,serial={serial},id={serial}"
+                ),
             ],
         )
     }
