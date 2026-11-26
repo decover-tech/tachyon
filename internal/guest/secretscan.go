@@ -69,7 +69,16 @@ var registryDirs = []string{
 	"/node-compile-cache/",
 }
 
+// compiledExts are Rust build outputs. Compiling public crates embeds
+// their doc and test sample keys (pem-rfc7468's example key, for one).
+var compiledExts = []string{".rlib", ".rmeta"}
+
 func fromRegistry(rel string) bool {
+	for _, e := range compiledExts {
+		if strings.HasSuffix(rel, e) {
+			return true
+		}
+	}
 	rel = "/" + filepath.ToSlash(rel)
 	for _, d := range registryDirs {
 		if strings.Contains(rel, d) {
