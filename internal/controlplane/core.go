@@ -413,6 +413,11 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 		ref, ok := c.hostSnapshot(a.HostID, repo)
 		if ok {
 			snapshotID = ref.GetId()
+			// A same-commit full match holds only for that prebuild; an older
+			// copy on this host has the old key files.
+			if fork.Match == prebuild.MatchFull && ref.GetKey() != snap.Key && cfg.TouchesKeyFiles(sub.ChangedFiles) {
+				fork = prebuild.Fork{Snapshot: snap, Match: prebuild.MatchPartial, Reason: "host prebuild predates the commit's key files"}
+			}
 		} else {
 			// The host lacks the prebuild. Until lazy loading is settled
 			// (open question), start from the base image and pull it for
