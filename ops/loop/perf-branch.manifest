@@ -1,0 +1,9 @@
+# What perf/instrumentation is built from (ops/loop/rebuild-perf-branch.sh).
+#
+#   base <ref>         the code under test starts here (normally origin/main)
+#   candidate <ref>    a branch to test on top of it; merged in this order
+#
+# The perf-only commits (subject "perf-only: ...") are replayed onto base
+# before the candidates. Edit this file, commit it as "perf-only: ...",
+# then rebuild. Every eval run records the resolved SHAs.
+base origin/main
