@@ -74,6 +74,7 @@ func main() {
 	flag.StringVar(&keyStore.VaultTokenFile, "vault-token-file", "", "file holding the Vault token, re-read per request (default: $TACHYON_VAULT_TOKEN)")
 	flag.DurationVar(&keyStore.JITTTL, "jit-ttl", secrets.DefaultJITTTL, "TTL of stored JIT runner configs")
 	prebuildInterval := flag.Duration("prebuild-interval", 10*time.Minute, "minimum time between push-triggered prebuilds of one repo")
+	prebuildEgress := flag.String("prebuild-egress", "", "comma-separated extra hosts, URLs or CIDRs prebuild warm steps may reach, e.g. registry.npmjs.org,pypi.org,files.pythonhosted.org when no mirror is running")
 	prebuildNightly := flag.Int("prebuild-nightly-hour", 3, "UTC hour after which each repo's nightly prebuild refresh runs")
 	nightlyHour := flag.Int("nightly-hour", 3, "UTC hour after which each opted-in repo's nightly clean run starts; -1 disables it")
 	nightlyRepos := flag.String("nightly-repos", "", "comma-separated owner/name repos opted in to the nightly clean run, which re-runs every job of a default-branch workflow run (deploy jobs too) and needs the App's actions:write and checks:write permissions; empty disables it")
@@ -258,8 +259,8 @@ func main() {
 		Log:         log,
 		MinInterval: *prebuildInterval,
 		NightlyHour: *prebuildNightly,
-		// Warm steps reach only the git host and Tachyon's mirrors.
-		EgressAllowlist: egressHosts("github.com", *npmMirror, *goMirror, *registryMirror, *mirrorPrimary, *mirrorSecondary),
+		// Warm steps reach only the git host, Tachyon's mirrors and -prebuild-egress.
+		EgressAllowlist: egressHosts(append([]string{"github.com", *npmMirror, *goMirror, *registryMirror, *mirrorPrimary, *mirrorSecondary}, splitList(*prebuildEgress)...)...),
 	}
 	core.Prebuild = pbManager
 	if k := os.Getenv("TACHYON_CACHE_KEY"); k != "" {
@@ -519,3 +520,14 @@ type prebuildRegistry struct {
 }
 
 func (r prebuildRegistry) SetConfig(repo string, c *prebuild.Config) { r.set(repo, c) }
+
+// splitList splits a comma-separated flag, dropping blanks.
+func splitList(s string) []string {
+	var out []string
+	for _, v := range strings.Split(s, ",") {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
