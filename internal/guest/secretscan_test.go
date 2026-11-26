@@ -70,6 +70,7 @@ func TestScanSecretsRegistryDirs(t *testing.T) {
 	files := map[string]string{
 		"home/runner/work/app/node_modules/selfsigned/README.md": key,
 		"opt/py/lib/python3.11/site-packages/x/tests/key.pem":    key,
+		"tmp/node-compile-cache/v23.11.0-x64-1-1001/3325a846":    key,
 		"home/runner/work/app/node_modules/x/cache.json":         "cached: runner-secret",
 		"home/runner/work/app/certs/dev.pem":                     key,
 	}
