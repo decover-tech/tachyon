@@ -74,7 +74,7 @@ func main() {
 	flag.StringVar(&keyStore.VaultTokenFile, "vault-token-file", "", "file holding the Vault token, re-read per request (default: $TACHYON_VAULT_TOKEN)")
 	flag.DurationVar(&keyStore.JITTTL, "jit-ttl", secrets.DefaultJITTTL, "TTL of stored JIT runner configs")
 	prebuildInterval := flag.Duration("prebuild-interval", 10*time.Minute, "minimum time between push-triggered prebuilds of one repo")
-	prebuildEgress := flag.String("prebuild-egress", "", "comma-separated extra hosts, URLs or CIDRs prebuild warm steps may reach, e.g. registry.npmjs.org,pypi.org,files.pythonhosted.org when no mirror is running")
+	prebuildEgress := flag.String("prebuild-egress", "", "comma-separated extra host:port, URL or CIDR entries prebuild warm steps may reach, e.g. registry.npmjs.org:443,pypi.org:443 when no mirror is running; a bare host or CIDR allows every port")
 	prebuildNightly := flag.Int("prebuild-nightly-hour", 3, "UTC hour after which each repo's nightly prebuild refresh runs")
 	nightlyHour := flag.Int("nightly-hour", 3, "UTC hour after which each opted-in repo's nightly clean run starts; -1 disables it")
 	nightlyRepos := flag.String("nightly-repos", "", "comma-separated owner/name repos opted in to the nightly clean run, which re-runs every job of a default-branch workflow run (deploy jobs too) and needs the App's actions:write and checks:write permissions; empty disables it")
@@ -497,7 +497,7 @@ func loadRollout(trustFile, manifests, canary string) (*images.Rollout, error) {
 	return r, nil
 }
 
-// egressHosts returns the host of each non-empty URL (or bare host).
+// egressHosts returns the host:port of each non-empty URL, or the entry itself.
 func egressHosts(urls ...string) []string {
 	var out []string
 	for _, u := range urls {
@@ -505,7 +505,16 @@ func egressHosts(urls ...string) []string {
 			continue
 		}
 		if p, err := url.Parse(u); err == nil && p.Host != "" {
+			// Keep the URL's port, so the rule does not open every port.
 			u = p.Host
+			if p.Port() == "" {
+				switch p.Scheme {
+				case "https":
+					u += ":443"
+				case "http":
+					u += ":80"
+				}
+			}
 		}
 		out = append(out, u)
 	}
