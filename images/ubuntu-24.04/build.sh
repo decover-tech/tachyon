@@ -238,6 +238,11 @@ stop_dockerd
 for ((i = ${#mounts[@]} - 1; i >= 0; i--)); do umount -l "${mounts[i]}"; done
 mounts=()
 rm -f "$root/usr/sbin/policy-rc.d" "$root/usr/local/sbin/systemctl" "$root/usr/local/sbin/journalctl" "$root/run/docker.pid" "$root/etc/ssh/"ssh_host_*
+# tachyon-guest starts dockerd inside each job's root, on the job's docker
+# volume; a system dockerd would only hold the read-only image's /var/lib/docker.
+rm -f "$root/etc/systemd/system/multi-user.target.wants/docker.service" \
+	"$root/etc/systemd/system/multi-user.target.wants/containerd.service" \
+	"$root/etc/systemd/system/sockets.target.wants/docker.socket"
 if [[ $grub_stub == 1 ]]; then rm -f "$root/usr/sbin/update-grub"; fi
 rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 	"$root"/tmp/* "$root"/var/tmp/* "$root"/root/.cache "$root"/home/runner/.cache
