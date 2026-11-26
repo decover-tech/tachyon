@@ -157,6 +157,9 @@ fi
 exec /usr/bin/systemctl "$@"
 SH
 chmod 755 "$root/usr/local/sbin/systemctl"
+# No journald runs in the chroot; cleanup.sh's journalctl calls would fail.
+printf '#!/bin/sh\n# Image build shim; see build.sh. Not in the finished image.\nexit 0\n' >"$root/usr/local/sbin/journalctl"
+chmod 755 "$root/usr/local/sbin/journalctl"
 
 # Upstream's file provisioners.
 ig=$root/imagegeneration
@@ -229,7 +232,7 @@ fi
 stop_dockerd
 for ((i = ${#mounts[@]} - 1; i >= 0; i--)); do umount -l "${mounts[i]}"; done
 mounts=()
-rm -f "$root/usr/sbin/policy-rc.d" "$root/usr/local/sbin/systemctl" "$root/run/docker.pid" "$root/etc/ssh/"ssh_host_*
+rm -f "$root/usr/sbin/policy-rc.d" "$root/usr/local/sbin/systemctl" "$root/usr/local/sbin/journalctl" "$root/run/docker.pid" "$root/etc/ssh/"ssh_host_*
 if [[ $grub_stub == 1 ]]; then rm -f "$root/usr/sbin/update-grub"; fi
 rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 	"$root"/tmp/* "$root"/var/tmp/* "$root"/root/.cache "$root"/home/runner/.cache
