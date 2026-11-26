@@ -155,6 +155,10 @@ func TestPlanFork(t *testing.T) {
 	damaged.Healthy = false
 	oldImage := *snap
 	oldImage.BaseImage = "ubuntu-24.04@0"
+	sameCommit := *snap
+	sameCommit.Commit = "c1"
+	atCommit := spec
+	atCommit.Commit = "c1"
 
 	tests := []struct {
 		name     string
@@ -172,6 +176,7 @@ func TestPlanFork(t *testing.T) {
 		{"other image", spec, cfg, nil, &oldImage, MatchNone, false},
 		{"key file changed", spec, cfg, []string{"go.sum"}, snap, MatchPartial, true},
 		{"full", spec, cfg, []string{"main.go"}, snap, MatchFull, true},
+		{"key file changed by the prebuilt commit", atCommit, cfg, []string{"go.sum"}, &sameCommit, MatchFull, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

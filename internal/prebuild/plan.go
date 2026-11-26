@@ -35,7 +35,8 @@ type Fork struct {
 // PlanFork decides what a job forks. A Tachyon problem must make a job
 // slower, never failed: a missing or damaged prebuild falls back to the base
 // image. A job whose commit touches a key file still forks the latest
-// prebuild but is marked partial, so its installs run.
+// prebuild but is marked partial, so its installs run, unless the prebuild
+// was built from that very commit.
 func PlanFork(spec jobapi.Spec, cfg *Config, changed []string, latest *Snapshot) Fork {
 	switch {
 	case spec.Prebuild.Policy == jobapi.PrebuildNone:
@@ -48,7 +49,7 @@ func PlanFork(spec jobapi.Spec, cfg *Config, changed []string, latest *Snapshot)
 		return Fork{Match: MatchNone, Reason: "prebuild damaged; using base image"}
 	case latest.BaseImage != spec.Image:
 		return Fork{Match: MatchNone, Reason: "prebuild built on a different base image"}
-	case cfg.TouchesKeyFiles(changed):
+	case (latest.Commit == "" || latest.Commit != spec.Commit) && cfg.TouchesKeyFiles(changed):
 		return Fork{Snapshot: latest, Match: MatchPartial, Reason: "commit changes a key file"}
 	}
 	return Fork{Snapshot: latest, Match: MatchFull}
