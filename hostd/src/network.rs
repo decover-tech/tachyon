@@ -400,7 +400,10 @@ impl HostNetwork {
         // asynchronously; delete the host ends now so setup can reuse them.
         let links = self.run("ip", &["-o", "link", "show", "type", "veth"])?;
         for veth in host_veths(&links) {
-            self.run("ip", &["link", "del", veth])?;
+            // Fails harmlessly if the kernel freed it since the listing.
+            if let Err(e) = self.run("ip", &["link", "del", veth]) {
+                tracing::warn!(veth, error = %format!("{e:#}"), "delete orphaned host veth");
+            }
         }
         Ok(stale)
     }
