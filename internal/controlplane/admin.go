@@ -12,6 +12,8 @@ import (
 	"time"
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
+	"github.com/decover-tech/tachyon/internal/billing"
+	"github.com/decover-tech/tachyon/internal/dashboard"
 )
 
 // ErrUnknownHost means no host with that ID has connected since the last
@@ -142,6 +144,11 @@ func LoadAdminToken(path string) ([]byte, error) {
 //	GET  /admin/hosts[?group=G][&version=V]   hosts with state, version, jobs
 //	POST /admin/hosts/{id}/drain              stop placing jobs on the host
 //	POST /admin/hosts/{id}/undrain            place jobs on it again
+//	GET  /admin/billing/invoices[?period=YYYY-MM][&tenant=T]
+//	                                          invoices priced by the meter
+//	                                          (current month by default)
+//	GET  /admin/dashboard?tenant=T[&since=][&until=][&repo=]
+//	                                          a tenant's minutes-saved report
 //
 // Every request, whatever the path, needs "Authorization: Bearer <token>".
 // Serve it on its own listener (-admin), never on the webhook port.
@@ -186,6 +193,42 @@ func AdminHandler(c *Core, token []byte) (http.Handler, error) {
 	}
 	mux.HandleFunc("POST /admin/hosts/{id}/drain", setDrain(true))
 	mux.HandleFunc("POST /admin/hosts/{id}/undrain", setDrain(false))
+	mux.HandleFunc("GET /admin/billing/invoices", func(w http.ResponseWriter, r *http.Request) {
+		b, ok := c.Meter.(Biller)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "billing is off (no prices configured)"})
+			return
+		}
+		period := billing.PeriodOf(c.now())
+		if v := r.URL.Query().Get("period"); v != "" {
+			if _, err := time.Parse("2006-01", v); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "period: want YYYY-MM"})
+				return
+			}
+			period = billing.Period(v)
+		}
+		tenants := b.Tenants(period)
+		if t := r.URL.Query().Get("tenant"); t != "" {
+			tenants = []string{t}
+		}
+		resp := InvoicesView{Period: string(period), Invoices: []InvoiceView{}}
+		for _, t := range tenants {
+			iv := invoiceView(b.Invoice(t, period))
+			resp.Invoices = append(resp.Invoices, iv)
+			resp.TotalMicroUSD += iv.TotalMicroUSD
+		}
+		resp.Total = billing.Money(resp.TotalMicroUSD).String()
+		writeJSON(w, http.StatusOK, resp)
+	})
+	mux.Handle("GET /admin/dashboard", &dashboard.Handler{
+		Source: c,
+		Rates:  c.DashboardRates,
+		Now:    c.now,
+		Tenant: func(r *http.Request) (string, bool) {
+			t := r.URL.Query().Get("tenant")
+			return t, t != ""
+		},
+	})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		const prefix = "Bearer "
@@ -206,4 +249,49 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// Biller prices metered usage into invoices; billing.Meter implements it.
+type Biller interface {
+	Tenants(p billing.Period) []string
+	Invoice(tenant string, p billing.Period) billing.Invoice
+}
+
+// InvoicesView is the response of GET /admin/billing/invoices.
+type InvoicesView struct {
+	Period        string        `json:"period"`
+	Invoices      []InvoiceView `json:"invoices"`
+	TotalMicroUSD int64         `json:"total_micro_usd"`
+	Total         string        `json:"total"`
+}
+
+// InvoiceView is one tenant's invoice. Amounts are micro-USD, with a
+// formatted copy for people.
+type InvoiceView struct {
+	Tenant        string     `json:"tenant"`
+	Period        string     `json:"period"`
+	Lines         []LineView `json:"lines"`
+	TotalMicroUSD int64      `json:"total_micro_usd"`
+	Total         string     `json:"total"`
+}
+
+// LineView is one invoice line.
+type LineView struct {
+	Repo           string  `json:"repo"`
+	Kind           string  `json:"kind"`
+	VCPU           int     `json:"vcpu,omitempty"`
+	Quantity       float64 `json:"quantity"`
+	Unit           string  `json:"unit"`
+	AmountMicroUSD int64   `json:"amount_micro_usd"`
+	Amount         string  `json:"amount"`
+}
+
+func invoiceView(inv billing.Invoice) InvoiceView {
+	v := InvoiceView{Tenant: inv.Tenant, Period: string(inv.Period), Lines: []LineView{},
+		TotalMicroUSD: int64(inv.Total), Total: inv.Total.String()}
+	for _, l := range inv.Lines {
+		v.Lines = append(v.Lines, LineView{Repo: l.Repo, Kind: string(l.Kind), VCPU: l.VCPU, Quantity: l.Quantity,
+			Unit: l.Unit, AmountMicroUSD: int64(l.Amount), Amount: l.Amount.String()})
+	}
+	return v
 }

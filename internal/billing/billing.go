@@ -265,6 +265,29 @@ type Invoice struct {
 	Total  Money
 }
 
+// Tenants returns the tenants with usage in a period, sorted.
+func (m *Meter) Tenants(p Period) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	set := map[string]bool{}
+	for k, d := range m.runner {
+		if k.period == p && d > 0 {
+			set[k.tenant] = true
+		}
+	}
+	for k, gbs := range m.storage {
+		if k.period == p && gbs > 0 {
+			set[k.tenant] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for t := range set {
+		out = append(out, t)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Invoice prices a tenant's usage for a period. Lines are sorted by repo,
 // kind and VM size. Each line's amount is rounded to the nearest micro-USD.
 func (m *Meter) Invoice(tenant string, p Period) Invoice {

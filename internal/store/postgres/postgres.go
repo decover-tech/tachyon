@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -219,6 +220,17 @@ func (s *Store) Record(ctx context.Context, jobID string) (telemetry.RecordData,
 
 func (s *Store) RecordsFor(ctx context.Context, jobIDs []string) ([]telemetry.RecordData, error) {
 	return queryJSON[telemetry.RecordData](ctx, s.pool, `SELECT data FROM job_records WHERE job_id = ANY($1) ORDER BY job_id`, jobIDs)
+}
+
+// RecordsFinishedSince reads the records written since since (a record is
+// written when its job finishes, so it cannot have finished later than its
+// last write) and keeps those that finished in range.
+func (s *Store) RecordsFinishedSince(ctx context.Context, since time.Time) ([]telemetry.RecordData, error) {
+	recs, err := queryJSON[telemetry.RecordData](ctx, s.pool, `SELECT data FROM job_records WHERE updated_at >= $1 ORDER BY job_id`, since)
+	if err != nil {
+		return nil, err
+	}
+	return store.FinishedSince(recs, since), nil
 }
 
 func (s *Store) PutPendingRunner(ctx context.Context, p store.PendingRunner) error {
