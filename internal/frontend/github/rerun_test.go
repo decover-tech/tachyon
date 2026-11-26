@@ -306,3 +306,25 @@ func TestAdapterServerErrorJobIsReconciled(t *testing.T) {
 		t.Fatalf("subs = %d after GitHub recovered, want 1", len(h.core.subs))
 	}
 }
+
+func TestAdapterRedispatchesJobWhoseRunnerWasTaken(t *testing.T) {
+	h := newHarness(t)
+	h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret)
+	h.post("workflow_job", jobEvent("queued", 2, tachyonLabels, ""), testSecret)
+	taken := h.api.created[1] // job 2's runner
+	h.post("workflow_job", jobEvent("in_progress", 1, tachyonLabels, taken), testSecret)
+
+	h.a.Reconcile(context.Background()) // no wait for ReconcileAfter
+	if len(h.core.subs) != 3 {
+		t.Fatalf("subs = %d, want job 2 re-dispatched at once", len(h.core.subs))
+	}
+	if id := h.core.subs[2].Spec.JobID; id != "gh_2-2" {
+		t.Fatalf("retry job ID = %q, want a new ID the core has not placed", id)
+	}
+	if len(h.api.deleted) != 0 {
+		t.Fatalf("deleted %v: the taken runner is running job 1", h.api.deleted)
+	}
+	if _, ok := h.a.jobs["gh_2-2"]; !ok {
+		t.Fatal("retry ID not mapped back to the GitHub job")
+	}
+}

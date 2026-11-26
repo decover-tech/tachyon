@@ -55,7 +55,7 @@ func TestAdapterRestartKeepsPendingAndActiveRunners(t *testing.T) {
 	h2.api.deleted, h2.api.runners = nil, nil
 	h2.clock = h2.clock.Add(2 * time.Minute)
 	h2.a.Reconcile(ctx)
-	if len(h2.core.subs) != 1 || h2.core.subs[0].Spec.JobID != "gh_9" {
+	if len(h2.core.subs) != 1 || h2.core.subs[0].Spec.JobID != "gh_9-2" {
 		t.Fatalf("restored job not re-dispatched: %+v", h2.core.subs)
 	}
 	if fmt.Sprint(h2.api.deleted) != "[1]" {

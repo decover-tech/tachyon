@@ -313,6 +313,14 @@ func (a *Adapter) onWorkflowJob(ctx context.Context, e workflowJobEvent) error {
 		a.mu.Lock()
 		delete(a.pending, j.ID)
 		a.active[j.RunnerName] = true
+		// GitHub gives a job to any idle runner whose labels match, so this
+		// may be another pending job's runner. That job has lost it:
+		// re-dispatch it on the next reconcile, and leave the runner alone.
+		for _, y := range a.pending {
+			if y.runnerName == j.RunnerName && y.dispatched && !y.busy {
+				y.runnerID, y.submittedAt = 0, time.Time{}
+			}
+		}
 		a.mu.Unlock()
 		a.forgetPending(ctx, j.ID)
 		a.saveActive(ctx, j.RunnerName, e.Installation.ID, e.Repository.FullName)
@@ -480,7 +488,19 @@ func (a *Adapter) prepare(ctx context.Context, p *pendingJob) error {
 // throttled attempt does not count towards MaxAttempts.
 func (a *Adapter) dispatch(ctx context.Context, p *pendingJob) error {
 	attempt := p.attempts + 1
-	name := fmt.Sprintf("tachyon-%s-%d", p.sub.Spec.JobID, attempt)
+	base := specJobID(p.id)
+	name := fmt.Sprintf("tachyon-%s-%d", base, attempt)
+	if attempt > 1 {
+		// A new ID per retry: the core ignores a job ID it has placed, and
+		// the earlier attempt's VM may still be running (its runner taken
+		// by another job).
+		p.sub.Spec.JobID = fmt.Sprintf("%s-%d", base, attempt)
+		a.mu.Lock()
+		if ref := a.jobs[base]; ref != nil {
+			a.jobs[p.sub.Spec.JobID] = ref
+		}
+		a.mu.Unlock()
+	}
 	var jit JITRunner
 	err := a.call(p.installationID, func() (err error) {
 		jit, err = a.API.CreateJITConfig(ctx, p.installationID, p.repo, name, p.labels)
