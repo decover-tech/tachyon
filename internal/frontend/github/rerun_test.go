@@ -121,8 +121,8 @@ func TestAdapterBacksOffAfterServerErrors(t *testing.T) {
 	h := newHarness(t)
 	h.a.Budget = &Budget{BackoffBase: 10 * time.Second}
 	h.api.err = &APIError{Status: http.StatusBadGateway, Remaining: -1}
-	if code := h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret); code != http.StatusInternalServerError {
-		t.Fatalf("status %d, want 500 so GitHub keeps the delivery", code)
+	if code := h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret); code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202: GitHub never redelivers, so the job is kept for reconcile", code)
 	}
 	// Within the backoff the next job is held, not sent to a failing API.
 	if code := h.post("workflow_job", jobEvent("queued", 2, tachyonLabels, ""), testSecret); code != http.StatusAccepted {
@@ -134,8 +134,8 @@ func TestAdapterBacksOffAfterServerErrors(t *testing.T) {
 	h.api.err = nil
 	h.clock = h.clock.Add(10 * time.Second)
 	h.a.Reconcile(context.Background())
-	if len(h.core.subs) != 1 || h.core.subs[0].Spec.JobID != "gh_2" {
-		t.Fatalf("subs = %+v", h.core.subs)
+	if len(h.core.subs) != 2 {
+		t.Fatalf("subs = %+v, want both jobs", h.core.subs)
 	}
 }
 
@@ -287,5 +287,22 @@ func TestAdapterInfraErrorBeforeStartRedispatches(t *testing.T) {
 	}
 	if len(h.api.reruns) != 0 {
 		t.Errorf("reruns = %v", h.api.reruns)
+	}
+}
+
+func TestAdapterServerErrorJobIsReconciled(t *testing.T) {
+	h := newHarness(t)
+	h.api.err = &APIError{Status: http.StatusInternalServerError, Remaining: -1}
+	if code := h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret); code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202: a job hit by a GitHub 5xx is kept for reconcile", code)
+	}
+	if len(h.core.subs) != 0 {
+		t.Fatalf("subs = %d", len(h.core.subs))
+	}
+	h.api.err = nil
+	h.clock = h.clock.Add(time.Minute) // past the budget's 5xx backoff
+	h.a.Reconcile(context.Background())
+	if len(h.core.subs) != 1 {
+		t.Fatalf("subs = %d after GitHub recovered, want 1", len(h.core.subs))
 	}
 }

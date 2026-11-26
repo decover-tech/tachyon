@@ -65,6 +65,13 @@ func IsThrottled(err error) bool {
 	return errors.As(err, &ae) && ae.RateLimited()
 }
 
+// IsTransient reports whether err is a GitHub server error (5xx), which is
+// worth retrying.
+func IsTransient(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Status >= 500
+}
+
 func (b *Budget) perHour() float64 {
 	if b.PerHour > 0 {
 		return float64(b.PerHour)

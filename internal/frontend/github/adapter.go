@@ -170,8 +170,9 @@ func (a *Adapter) serveWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
 	if err := a.handleEvent(r.Context(), event, body); err != nil {
 		a.log().Warn("webhook failed", "event", event, "delivery", r.Header.Get("X-GitHub-Delivery"), "err", err)
-		// 5xx makes GitHub keep the delivery for redelivery; the reconcile
-		// loop also covers jobs we never saw succeed.
+		// 5xx marks the delivery failed in the App's log. GitHub does not
+		// redeliver it on its own, so retriable failures must stay pending
+		// for Reconcile instead of returning here.
 		http.Error(w, "processing failed", http.StatusInternalServerError)
 		return
 	}
@@ -378,10 +379,12 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 	}
 	switch {
 	case err == nil:
-	case IsThrottled(err):
+	case IsThrottled(err) || IsTransient(err):
 		// The job stays pending; Reconcile dispatches it once the
-		// installation's budget recovers.
-		a.log().Warn("GitHub API throttled; job left for reconcile", "repo", p.repo, "job", j.ID, "err", err)
+		// installation's budget recovers or GitHub answers again. GitHub
+		// does not redeliver failed webhooks, so dropping it would leave
+		// the job queued forever.
+		a.log().Warn("GitHub API unavailable; job left for reconcile", "repo", p.repo, "job", j.ID, "throttled", IsThrottled(err), "err", err)
 		err = nil
 	default:
 		a.mu.Lock()
