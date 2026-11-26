@@ -19,6 +19,10 @@ import (
 // Port is the vsock port the agent listens on (GUEST_AGENT_PORT in hostd).
 const Port = 1024
 
+// ReadyPort accepts connections once the agent is listening on Port; hostd
+// probes it before taking the base snapshot (GUEST_READY_PORT in hostd).
+const ReadyPort = 1025
+
 // MaxPayload bounds the payload frame. Files (mirror configs) are small; this
 // only stops a corrupt length prefix from allocating gigabytes.
 const MaxPayload = 64 << 20

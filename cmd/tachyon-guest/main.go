@@ -42,7 +42,7 @@ func main() {
 }
 
 func serve(ctx context.Context, log *slog.Logger, sys guest.System, port uint32) int {
-	conn, err := guest.AcceptVsock(port)
+	conn, err := guest.AcceptVsock(port, guest.ReadyPort)
 	if err != nil {
 		log.Error("listen", "err", err)
 		return 1

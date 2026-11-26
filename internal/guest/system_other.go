@@ -25,4 +25,4 @@ func (otherSystem) Quiesce(context.Context, []string) error              { retur
 func (otherSystem) PowerOff() error                                      { return errNotLinux }
 
 // AcceptVsock is Linux-only.
-func AcceptVsock(uint32) (io.ReadWriteCloser, error) { return nil, errNotLinux }
+func AcceptVsock(uint32, uint32) (io.ReadWriteCloser, error) { return nil, errNotLinux }
