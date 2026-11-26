@@ -43,6 +43,13 @@ pub const GUEST_READY_PORT: u32 = 1025;
 const SIGNING_CONTEXT: &[u8] = b"tachyon-base-image-manifest-v1\x00";
 /// Written into a snapshot directory last; its absence means incomplete.
 const READY_MARKER: &str = ".tachyon-ready";
+/// Contents of a ready marker. Bump when snapshots change shape (2: the VM
+/// has a NIC on tap0), so prepare rebuilds older ones and hosts refuse them.
+const SNAPSHOT_FORMAT: &[u8] = b"2\n";
+
+fn marker_current(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|c| c == SNAPSHOT_FORMAT)
+}
 
 /// The snapshot's virtio-net MAC. Every restored VM reuses it: each sits
 /// alone on its own tap in its own namespace.
@@ -270,7 +277,7 @@ impl ImageStore {
         let mut built = Vec::new();
         for &vcpu in &m.sizes {
             let out = self.snapshot_dir(image, vcpu)?;
-            if out.join(READY_MARKER).exists() {
+            if marker_current(&out.join(READY_MARKER)) {
                 continue;
             }
             let tmp = out.with_file_name(format!(".{vcpu}.tmp"));
@@ -287,12 +294,12 @@ impl ImageStore {
             builder
                 .build(&spec, &tmp)
                 .with_context(|| format!("{image}: snapshot {vcpu} vCPU"))?;
-            fs::write(tmp.join(READY_MARKER), b"")?;
+            fs::write(tmp.join(READY_MARKER), SNAPSHOT_FORMAT)?;
             fs::rename(&tmp, &out)?;
             built.push(vcpu);
         }
         // Every size the manifest lists is done: the image is usable.
-        fs::write(dir.join("snapshots").join(READY_MARKER), b"")?;
+        fs::write(dir.join("snapshots").join(READY_MARKER), SNAPSHOT_FORMAT)?;
         Ok(built)
     }
 
@@ -304,7 +311,9 @@ impl ImageStore {
         };
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if check_ref(&name).is_ok() && e.path().join("snapshots").join(READY_MARKER).exists() {
+            if check_ref(&name).is_ok()
+                && marker_current(&e.path().join("snapshots").join(READY_MARKER))
+            {
                 out.push(name);
             }
         }
@@ -378,12 +387,7 @@ impl SnapshotSource {
                     bail!("job names no base image");
                 }
                 check_ref(image)?;
-                if !root
-                    .join(image)
-                    .join("snapshots")
-                    .join(READY_MARKER)
-                    .exists()
-                {
+                if !marker_current(&root.join(image).join("snapshots").join(READY_MARKER)) {
                     bail!("base image {image} is not prepared on this host");
                 }
                 Ok(image.to_string())
@@ -692,6 +696,24 @@ mod tests {
     }
 
     #[test]
+    fn older_snapshot_format_is_rebuilt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = store(&tmp);
+        let k = key();
+        let dir = stage(&s, "ubuntu-24.04@2026-11-16", &k);
+        let b = FakeBuilder::default();
+        let trusted = [k.verifying_key()];
+        s.prepare("ubuntu-24.04@2026-11-16", &trusted, &b).unwrap();
+        // Markers from before SNAPSHOT_FORMAT were empty.
+        fs::write(dir.join("snapshots/4").join(READY_MARKER), b"").unwrap();
+        fs::write(dir.join("snapshots").join(READY_MARKER), b"").unwrap();
+        assert!(s.ready().is_empty(), "old-format image reported ready");
+        let built = s.prepare("ubuntu-24.04@2026-11-16", &trusted, &b).unwrap();
+        assert_eq!(built, vec![4]);
+        assert_eq!(s.ready(), vec!["ubuntu-24.04@2026-11-16".to_string()]);
+    }
+
+    #[test]
     fn failed_size_is_retried_and_not_ready() {
         let tmp = tempfile::tempdir().unwrap();
         let s = store(&tmp);
@@ -800,7 +822,7 @@ mod tests {
         for r in refs {
             let snaps = tmp.path().join(r).join("snapshots");
             fs::create_dir_all(&snaps).unwrap();
-            fs::write(snaps.join(READY_MARKER), b"").unwrap();
+            fs::write(snaps.join(READY_MARKER), SNAPSHOT_FORMAT).unwrap();
         }
         SnapshotSource::Store(tmp.path().to_path_buf())
     }
