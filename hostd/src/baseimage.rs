@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use crate::hypervisor::IN_JAIL_DIR;
 use crate::jailer::JailSpec;
+use crate::network::TAP;
 use crate::pb;
 
 /// VM sizes in vCPU.
@@ -42,6 +43,10 @@ pub const GUEST_READY_PORT: u32 = 1025;
 const SIGNING_CONTEXT: &[u8] = b"tachyon-base-image-manifest-v1\x00";
 /// Written into a snapshot directory last; its absence means incomplete.
 const READY_MARKER: &str = ".tachyon-ready";
+
+/// The snapshot's virtio-net MAC. Every restored VM reuses it: each sits
+/// alone on its own tap in its own namespace.
+pub const GUEST_MAC: &str = "52:54:00:7a:c0:02";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Blob {
@@ -473,6 +478,9 @@ pub fn boot_args(spec: &BootSpec) -> Vec<String> {
         format!("file={},discard_writes=on", spec.rootfs.display()),
         "--vsock".into(),
         format!("cid=3,socket={IN_JAIL_DIR}/vsock.sock"),
+        // Restore reopens the tap by name in the job VM's namespace.
+        "--net".into(),
+        format!("tap={TAP},mac={GUEST_MAC}"),
         "--console".into(),
         "off".into(),
         "--serial".into(),
@@ -527,17 +535,22 @@ impl SnapshotBuilder for ChSnapshotBuilder {
         std::os::unix::fs::chown(&dir, Some(self.uid), Some(self.gid))?;
         std::os::unix::fs::chown(out, Some(self.uid), Some(self.gid))?;
         let jail = JailSpec {
-            job_id: id,
+            job_id: id.clone(),
             uid: self.uid,
             gid: self.gid,
             cgroup_parent: self.cgroup_parent.clone(),
             cpu_weight: 100 * spec.vcpu,
             memory_max_bytes: (u64::from(spec.memory_gb) << 30) + (512 << 20),
             bind: Some((dir.clone(), PathBuf::from(IN_JAIL_DIR))),
-            // Image preparation boots offline.
-            netns: None,
+            // Offline: the namespace holds only an unconnected tap, so the
+            // snapshot has the NIC every job VM's tap is attached to.
+            netns: Some(Path::new("/run/netns").join(&id)),
         };
-        jail.create_cgroup()?;
+        prep_netns(&id, self.uid, self.gid)?;
+        if let Err(e) = jail.create_cgroup() {
+            let _ = ip(&["netns", "del", &id]);
+            return Err(e);
+        }
         let mut cmd = Command::new(&self.binary);
         cmd.args(boot_args(spec))
             .stdin(Stdio::null())
@@ -554,9 +567,37 @@ impl SnapshotBuilder for ChSnapshotBuilder {
         let _ = child.kill();
         let _ = child.wait();
         let _ = jail.remove_cgroup();
+        let _ = ip(&["netns", "del", &id]);
         let _ = fs::remove_dir_all(&dir);
         result
     }
+}
+
+fn ip(args: &[&str]) -> Result<()> {
+    let out = Command::new("ip").args(args).output().context("spawn ip")?;
+    if !out.status.success() {
+        bail!(
+            "ip {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// A namespace holding only `tap0`, owned by the snapshot VM's user.
+fn prep_netns(ns: &str, uid: u32, gid: u32) -> Result<()> {
+    let _ = ip(&["netns", "del", ns]);
+    ip(&["netns", "add", ns])?;
+    let (uid, gid) = (uid.to_string(), gid.to_string());
+    let r = ip(&[
+        "-n", ns, "tuntap", "add", "dev", TAP, "mode", "tap", "user", &uid, "group", &gid,
+    ])
+    .and_then(|()| ip(&["-n", ns, "link", "set", TAP, "up"]));
+    if r.is_err() {
+        let _ = ip(&["netns", "del", ns]);
+    }
+    r
 }
 
 #[cfg(test)]
@@ -858,6 +899,7 @@ mod tests {
         assert!(s.contains("--pmem file=/img/rootfs.ext4,discard_writes=on"));
         assert!(s.contains(&format!("--vsock cid=3,socket={IN_JAIL_DIR}/vsock.sock")));
         assert!(s.contains(&format!("--api-socket path={IN_JAIL_DIR}/api.sock")));
+        assert!(s.contains(&format!("--net tap=tap0,mac={GUEST_MAC}")));
     }
 
     #[test]
