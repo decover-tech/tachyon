@@ -184,6 +184,25 @@ func testRecords(t *testing.T, s store.Store) {
 	if err != nil || len(list) != 1 || list[0].JobID != "j1" {
 		t.Fatalf("RecordsFor = %+v %v", list, err)
 	}
+
+	since := time.Now().Add(-time.Minute)
+	if list, err := s.RecordsFinishedSince(ctx, since); err != nil || len(list) != 0 {
+		t.Fatalf("unfinished job in RecordsFinishedSince = %+v %v", list, err)
+	}
+	r.Mark(telemetry.JobFinished, time.Now())
+	if err := s.PutRecord(ctx, r.Data()); err != nil {
+		t.Fatal(err)
+	}
+	old := telemetry.NewRecord("j0")
+	old.Tenant, old.Repo = "t", "github.com/acme/api"
+	old.Mark(telemetry.JobFinished, since.Add(-time.Hour))
+	if err := s.PutRecord(ctx, old.Data()); err != nil {
+		t.Fatal(err)
+	}
+	list, err = s.RecordsFinishedSince(ctx, since)
+	if err != nil || len(list) != 1 || list[0].JobID != "j1" {
+		t.Fatalf("RecordsFinishedSince = %+v %v", list, err)
+	}
 }
 
 func testRunners(t *testing.T, s store.Store) {

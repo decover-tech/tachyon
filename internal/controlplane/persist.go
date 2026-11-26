@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
+	"time"
 
 	"github.com/decover-tech/tachyon/internal/jobapi"
 	"github.com/decover-tech/tachyon/internal/prebuild"
@@ -178,4 +180,28 @@ func (p *StorePrebuilds) Register(s prebuild.Snapshot) {
 // SetConfig records the prebuild config for a repo.
 func (p *StorePrebuilds) SetConfig(repo string, c *prebuild.Config) error {
 	return p.Store.PutPrebuildConfig(context.Background(), repo, c)
+}
+
+// ReplayMeter meters the jobs that finished at or after since, from the
+// store, so a restart keeps the period's usage. Jobs are replayed in the
+// order they finished, which is the order the prebuild allowance was drawn
+// down. The meter ignores jobs it already has, so replaying is safe at any
+// time. It returns how many records it read.
+func (c *Core) ReplayMeter(ctx context.Context, since time.Time) (int, error) {
+	if c.Store == nil || c.Meter == nil {
+		return 0, nil
+	}
+	recs, err := c.Store.RecordsFinishedSince(ctx, since)
+	if err != nil {
+		return 0, fmt.Errorf("replay meter: %w", err)
+	}
+	sort.SliceStable(recs, func(i, j int) bool {
+		return recs[i].Phases[telemetry.JobFinished].Before(recs[j].Phases[telemetry.JobFinished])
+	})
+	for _, r := range recs {
+		if err := c.Meter.RecordJob(telemetry.FromData(r)); err != nil {
+			c.log().Warn("job not metered", "job", r.JobID, "err", err)
+		}
+	}
+	return len(recs), nil
 }

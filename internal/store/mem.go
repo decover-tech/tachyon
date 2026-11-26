@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/decover-tech/tachyon/internal/prebuild"
 	"github.com/decover-tech/tachyon/internal/telemetry"
@@ -175,6 +176,19 @@ func (m *Mem) Record(_ context.Context, jobID string) (telemetry.RecordData, err
 		return telemetry.RecordData{}, ErrNotFound
 	}
 	return clone(r), nil
+}
+
+func (m *Mem) RecordsFinishedSince(_ context.Context, since time.Time) ([]telemetry.RecordData, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []telemetry.RecordData
+	for _, r := range m.records {
+		if finishedSince(r, since) {
+			out = append(out, clone(r))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].JobID < out[j].JobID })
+	return out, nil
 }
 
 func (m *Mem) RecordsFor(_ context.Context, jobIDs []string) ([]telemetry.RecordData, error) {

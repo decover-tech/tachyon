@@ -1,0 +1,48 @@
+# Control plane with Postgres, metering and billing on. Put the GitHub App
+# key, the hostlink TLS files and the operator token in ./secrets first (see
+# README.md next to this file), then:
+#   docker compose -f deploy/controlplane/docker-compose.yml up -d
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: tachyon
+      POSTGRES_USER: tachyon
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./secrets/db-password:/run/secrets/db-password:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tachyon -d tachyon"]
+      interval: 5s
+      retries: 20
+
+  controlplane:
+    build:
+      context: ../..
+      dockerfile: deploy/controlplane/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: ./controlplane.env
+    command:
+      - -github-app-id=${TACHYON_GITHUB_APP_ID}
+      - -github-app-key=/secrets/github-app.pem
+      - -hostlink-cert=/secrets/hostlink.crt
+      - -hostlink-key=/secrets/hostlink.key
+      - -hostlink-client-ca=/secrets/hosts-ca.crt
+      - -admin-addr=:8081
+      - -admin-token-file=/secrets/admin-token
+      - -bill-runner-per-minute=${TACHYON_BILL_RUNNER_PER_MINUTE:-2=0.002,4=0.004,8=0.008,16=0.016}
+      - -bill-prebuild-allowance=${TACHYON_BILL_PREBUILD_ALLOWANCE:-10h}
+      - -bill-storage-quota-gb=${TACHYON_BILL_STORAGE_QUOTA_GB:-50}
+      - -bill-storage-gb-month=${TACHYON_BILL_STORAGE_GB_MONTH:-0.10}
+    volumes:
+      - ./secrets:/secrets:ro
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+      - "127.0.0.1:8081:8081"
+
+volumes:
+  pgdata:

@@ -33,6 +33,7 @@ D1 is decided ([docs/decisions/0001-language.md](docs/decisions/0001-language.md
 | `internal/telemetry/` | Go | Per-job phase record (pickup, billable seconds, cost), OpenTelemetry fleet metrics, ClickHouse export |
 | `internal/billing/` | Go | Metering from the telemetry record: per-second runner time by VM size, per-repo prebuild allowance, storage above quota per GB-month |
 | `internal/secrets/` | Go | Key store for JIT configs and tokens (Vault/OpenBao KV v2, or in-memory for dev): `secret://` refs, short TTLs, redaction ([0002-key-store.md](docs/decisions/0002-key-store.md)) |
+| `deploy/controlplane/` | config | Control plane container image and a compose stack with Postgres and billing on |
 | `deploy/observability/` | config | OTel Collector, Prometheus SLO rules, Grafana dashboards, ClickHouse job-record schema, local docker-compose stack |
 | `internal/abuse/` | Go | Abuse controls: free/trial plan limits and verification, CPU and network anomaly alerts with automatic cancel/suspend |
 | `actions/warm/` | Action | `tachyon/warm`: restores workspace paths from the prebuild after `actions/checkout` |
@@ -168,6 +169,8 @@ Observability is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `h
 The control plane runs signed images with a canary rollout instead of static `-image` pins when given `-image-trust keys.pem -image-manifests a/manifest.signed.json -canary-hosts h1,h2`.
 
 Hosts are provisioned with `deploy/fleet/tachyon-host-bootstrap.sh`, and drained and upgraded through the control plane's operator API (`-admin-addr`, `-admin-token-file`; off by default). The runbook, and what has not been tried on real hardware, are in [docs/fleet-operations.md](docs/fleet-operations.md).
+
+Metering and billing turn on with `-bill-runner-per-minute` (prices by VM size; see [deploy/controlplane](deploy/controlplane)). Usage is rebuilt from Postgres job records on start, and the operator API serves invoices (`GET /admin/billing/invoices?period=YYYY-MM[&tenant=T]`) and each tenant's minutes-saved report (`GET /admin/dashboard?tenant=T`).
 
 Each VM gets its own network namespace and tap (`hostd/src/network.rs`); hostd needs `ip`, `nft` and `tc` on the host, and base snapshots must use a virtio-net device on `tap0` with guest address `172.16.0.2/30`, gateway `172.16.0.1`.
 

@@ -15,6 +15,7 @@ import (
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
 	"github.com/decover-tech/tachyon/internal/abuse"
 	"github.com/decover-tech/tachyon/internal/cache"
+	"github.com/decover-tech/tachyon/internal/dashboard"
 	"github.com/decover-tech/tachyon/internal/jobapi"
 	"github.com/decover-tech/tachyon/internal/mirrors"
 	"github.com/decover-tech/tachyon/internal/prebuild"
@@ -108,6 +109,9 @@ type Core struct {
 	Metrics    *telemetry.Metrics
 	JobRecords JobRecordSink
 	Pricing    telemetry.Pricing
+	// DashboardRates are the GitHub-hosted prices the admin dashboard
+	// compares against; nil uses dashboard.DefaultRates.
+	DashboardRates dashboard.Rates
 	// Limits, when set, refuses jobs over free/trial plan limits or from
 	// unverified or suspended tenants.
 	Limits *abuse.Gate

@@ -115,6 +115,9 @@ type Store interface {
 	Record(ctx context.Context, jobID string) (telemetry.RecordData, error)
 	// RecordsFor returns the records of the given jobs that exist.
 	RecordsFor(ctx context.Context, jobIDs []string) ([]telemetry.RecordData, error)
+	// RecordsFinishedSince returns the records of jobs that finished at or
+	// after since, ordered by job ID. Billing replays them on start.
+	RecordsFinishedSince(ctx context.Context, since time.Time) ([]telemetry.RecordData, error)
 
 	PutPendingRunner(ctx context.Context, p PendingRunner) error
 	DeletePendingRunner(ctx context.Context, frontend string, externalID int64) error
@@ -123,4 +126,22 @@ type Store interface {
 	PutActiveRunner(ctx context.Context, r ActiveRunner) error
 	DeleteActiveRunner(ctx context.Context, frontend, name string) error
 	ActiveRunners(ctx context.Context, frontend string) ([]ActiveRunner, error)
+}
+
+// finishedSince reports whether r's job finished at or after since.
+func finishedSince(r telemetry.RecordData, since time.Time) bool {
+	t, ok := r.Phases[telemetry.JobFinished]
+	return ok && !t.Before(since)
+}
+
+// FinishedSince keeps the records whose job finished at or after since.
+// Stores whose query can only bound the update time use it to filter.
+func FinishedSince(recs []telemetry.RecordData, since time.Time) []telemetry.RecordData {
+	out := recs[:0]
+	for _, r := range recs {
+		if finishedSince(r, since) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
