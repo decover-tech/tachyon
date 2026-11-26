@@ -349,6 +349,91 @@ impl ImageStore {
     }
 }
 
+/// Where VMs restore their base snapshots from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SnapshotSource {
+    /// Versioned: `<root>/<name>@<version>/snapshots/<vcpu>/`, as written by
+    /// `prepare-image`. Only images whose snapshots are all ready are used.
+    Store(PathBuf),
+    /// One fixed directory `<dir>/<vcpu>/` (TACHYON_BASE_SNAPSHOTS), for
+    /// single-image setups. With `image` set, only jobs pinned to that
+    /// image run; without it, every job runs on whatever the directory
+    /// holds, as before versions existed.
+    Static { dir: PathBuf, image: Option<String> },
+}
+
+impl SnapshotSource {
+    /// Checks a host can run jobs for `image` and returns its canonical
+    /// key, which warm VMs are pooled under. Fails, rather than falling
+    /// back to another version, when the image is not prepared here.
+    pub fn check(&self, image: &str) -> Result<String> {
+        match self {
+            Self::Store(root) => {
+                if image.is_empty() {
+                    bail!("job names no base image");
+                }
+                check_ref(image)?;
+                if !root
+                    .join(image)
+                    .join("snapshots")
+                    .join(READY_MARKER)
+                    .exists()
+                {
+                    bail!("base image {image} is not prepared on this host");
+                }
+                Ok(image.to_string())
+            }
+            Self::Static { image: None, .. } => Ok(String::new()),
+            Self::Static {
+                image: Some(pinned),
+                ..
+            } => {
+                if image != pinned {
+                    bail!("this host serves only base image {pinned}, not {image:?}");
+                }
+                Ok(pinned.clone())
+            }
+        }
+    }
+
+    /// The snapshot directory for a canonical key (see `check`) and size.
+    pub fn dir(&self, key: &str, vcpu: u32) -> Result<PathBuf> {
+        match self {
+            Self::Store(root) => {
+                check_ref(key)?;
+                Ok(root.join(key).join("snapshots").join(vcpu.to_string()))
+            }
+            Self::Static { dir, .. } => Ok(dir.join(vcpu.to_string())),
+        }
+    }
+
+    /// Canonical keys to keep warm VMs for: the newest ready version of
+    /// each image name (older versions restore on demand), or the one
+    /// static image.
+    pub fn warm_images(&self) -> Vec<String> {
+        match self {
+            Self::Store(root) => {
+                let mut newest: std::collections::BTreeMap<String, String> = Default::default();
+                for r in ImageStore::new(root.clone()).ready() {
+                    if let Some((n, v)) = r.split_once('@') {
+                        let better = newest
+                            .get(n)
+                            .is_none_or(|cur| version_key(v) > version_key(cur));
+                        if better {
+                            newest.insert(n.to_string(), v.to_string());
+                        }
+                    }
+                }
+                newest
+                    .into_iter()
+                    .map(|(n, v)| format!("{n}@{v}"))
+                    .collect()
+            }
+            Self::Static { image, .. } => vec![image.clone().unwrap_or_default()],
+        }
+    }
+}
+
 /// Orders "2026-11-16" < "2026-11-16.1" < "2026-11-16.10" < "2026-11-23".
 fn version_key(v: &str) -> (String, u64) {
     match v.split_once('.') {
@@ -668,6 +753,68 @@ mod tests {
         assert!(s.dir("ubuntu-24.04@2026-11-16").unwrap().exists());
         assert!(s.dir("ubuntu-24.04@2026-11-02").unwrap().exists());
         assert!(tmp.path().join("not-an-image").exists());
+    }
+
+    fn prepared_store(tmp: &tempfile::TempDir, refs: &[&str]) -> SnapshotSource {
+        for r in refs {
+            let snaps = tmp.path().join(r).join("snapshots");
+            fs::create_dir_all(&snaps).unwrap();
+            fs::write(snaps.join(READY_MARKER), b"").unwrap();
+        }
+        SnapshotSource::Store(tmp.path().to_path_buf())
+    }
+
+    #[test]
+    fn store_source_is_per_version_and_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = prepared_store(
+            &tmp,
+            &["ubuntu-24.04@2026-11-09", "ubuntu-24.04@2026-11-16"],
+        );
+        // Half-built version: has snapshots but no ready marker.
+        fs::create_dir_all(tmp.path().join("ubuntu-24.04@2026-11-23/snapshots/2")).unwrap();
+
+        let key = src.check("ubuntu-24.04@2026-11-09").unwrap();
+        assert_eq!(
+            src.dir(&key, 8).unwrap(),
+            tmp.path().join("ubuntu-24.04@2026-11-09/snapshots/8")
+        );
+        let err = src.check("ubuntu-24.04@2026-11-23").unwrap_err();
+        assert!(format!("{err:#}").contains("not prepared"), "{err:#}");
+        assert!(src.check("ubuntu-24.04@2020-01-01").is_err());
+        assert!(src.check("").is_err(), "no silent default image");
+        assert!(src.check("../../etc@x").is_err());
+        assert!(src.dir("../x@1", 2).is_err());
+        // Only the newest ready version is kept warm.
+        assert_eq!(
+            src.warm_images(),
+            vec!["ubuntu-24.04@2026-11-16".to_string()]
+        );
+    }
+
+    #[test]
+    fn static_source_is_backward_compatible_and_can_pin() {
+        let any = SnapshotSource::Static {
+            dir: "/snap".into(),
+            image: None,
+        };
+        // Unpinned: every job maps to the one directory and one pool key.
+        assert_eq!(any.check("ubuntu-24.04@2026-11-16").unwrap(), "");
+        assert_eq!(any.check("").unwrap(), "");
+        assert_eq!(any.dir("", 4).unwrap(), PathBuf::from("/snap/4"));
+        assert_eq!(any.warm_images(), vec![String::new()]);
+
+        let pinned = SnapshotSource::Static {
+            dir: "/snap".into(),
+            image: Some("ubuntu-24.04@2026-11-16".into()),
+        };
+        assert!(pinned.check("ubuntu-24.04@2026-11-16").is_ok());
+        let err = pinned.check("ubuntu-24.04@2026-11-23").unwrap_err();
+        assert!(format!("{err:#}").contains("serves only"), "{err:#}");
+        assert_eq!(
+            pinned.warm_images(),
+            vec!["ubuntu-24.04@2026-11-16".to_string()]
+        );
     }
 
     #[test]

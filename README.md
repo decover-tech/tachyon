@@ -127,13 +127,14 @@ Observability is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `h
 | `TACHYON_TLS_CERT`, `TACHYON_TLS_KEY`, `TACHYON_TLS_CA` | yes, unless `TACHYON_HOSTLINK_INSECURE=1` | host client cert/key and the control plane's CA; see [docs/hostlink-mtls.md](docs/hostlink-mtls.md) |
 | `TACHYON_TLS_SERVER_NAME` | no | host from `TACHYON_CONTROL_PLANE` |
 | `TACHYON_ZFS_POOL` | yes | e.g. `tank/tachyon` |
-| `TACHYON_BASE_SNAPSHOTS` | yes | dir with one Cloud Hypervisor snapshot per VM size: `<dir>/<vcpu>/` |
+| `TACHYON_IMAGES` or `TACHYON_BASE_SNAPSHOTS` | one of them | `TACHYON_IMAGES`: base image store `<dir>/<name>@<version>/`; each job restores from the snapshots of the version it is assigned, and a version not prepared on the host is refused. `TACHYON_BASE_SNAPSHOTS`: single-image setups, one dir with a snapshot per VM size, `<dir>/<vcpu>/`, used for every job (ignored when `TACHYON_IMAGES` is set) |
+| `TACHYON_BASE_IMAGE` | no | with `TACHYON_BASE_SNAPSHOTS`: the `name@version` that directory holds; jobs for any other version are refused |
 | `TACHYON_WARM` | no | `2:2,4:2,8:1` (vcpu:paused VMs) |
 | `TACHYON_FAILURE_DOMAIN`, `TACHYON_ARCH` | no | `default`, `x86_64` |
 | `TACHYON_HOST_GROUP` | no | empty; fleet group such as `canary` or `stable`, reported in Hello and shown by the operator API; see [docs/fleet-operations.md](docs/fleet-operations.md) |
 | `TACHYON_CH_BINARY`, `TACHYON_CH_REMOTE` | no | `/usr/local/bin/cloud-hypervisor`, `/usr/local/bin/ch-remote` |
 | `TACHYON_RUN_DIR`, `TACHYON_CGROUP`, `TACHYON_BASE_UID` | no | `/run/tachyon/vms`, `/sys/fs/cgroup/tachyon`, `100000` |
-| `TACHYON_IMAGES` | no | base image store, `<dir>/<name>@<version>/`; prepared versions are reported in heartbeats |
+| `TACHYON_IMAGES_KEEP` | no | unset: never delete images. N (at least 2 is enforced): hostd deletes older versions beyond the newest N per image name, never one a running job or warm VM uses |
 | `TACHYON_EGRESS_MBIT` | no | `1000` (per-VM egress limit; `0` disables) |
 | `TACHYON_MIRRORS` | no | comma list of mirror URLs, hosts or CIDRs every VM (including prebuild builds) may reach |
 | `TACHYON_DNS` | no | comma list of IPv4 DNS servers guests may query |
@@ -142,7 +143,7 @@ Observability is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `h
 | `TACHYON_STATE_DIR` | no | `/var/lib/tachyon/hostd`: unacked job events/results and running-job markers, kept across restarts |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | no | unset: no metrics export. OTLP/gRPC, e.g. `http://otel-collector:4317` |
 
-`tachyon-hostd prepare-image ubuntu-24.04@2026-11-16` verifies an image in `TACHYON_IMAGES` against the keys in `TACHYON_IMAGE_TRUST` (PEM), then boots it once per VM size and leaves paused snapshots in `<image>/snapshots/<vcpu>/` (point `TACHYON_BASE_SNAPSHOTS` there). It boots `TACHYON_GUEST_KERNEL` when the image ships no kernel.
+`tachyon-hostd prepare-image ubuntu-24.04@2026-11-16` verifies an image in `TACHYON_IMAGES` against the keys in `TACHYON_IMAGE_TRUST` (PEM), then boots it once per VM size and leaves paused snapshots in `<image>/snapshots/<vcpu>/` (hostd restores from them when `TACHYON_IMAGES` is set). Prepared versions are reported in heartbeats and rescanned every minute, so a version prepared while hostd runs is picked up and warmed without a restart. It boots `TACHYON_GUEST_KERNEL` when the image ships no kernel.
 
 The control plane runs signed images with a canary rollout instead of static `-image` pins when given `-image-trust keys.pem -image-manifests a/manifest.signed.json -canary-hosts h1,h2`.
 
@@ -150,13 +151,15 @@ Hosts are provisioned with `deploy/fleet/tachyon-host-bootstrap.sh`, and drained
 
 Each VM gets its own network namespace and tap (`hostd/src/network.rs`); hostd needs `ip`, `nft` and `tc` on the host, and base snapshots must use a virtio-net device on `tap0` with guest address `172.16.0.2/30`, gateway `172.16.0.1`.
 
+See [docs/image-pipeline-runbook.md](docs/image-pipeline-runbook.md) for building, signing, installing and rolling out a base image.
+
 ## Status
 
 Built and unit-tested: the job spec, GitHub adapter (per-installation API budget, opt-in re-runs of infrastructure failures, nightly clean run, pilot-org allowlist), scheduler, prebuild config/keys/fork planning, the prebuild manager (against a fake platform source), the Actions cache service and its scoping rules, mirror config and the mirror pair, the guest agent, the hostlink protocol on both sides (mTLS, acks and replay), hostd (networking, cancel, pre-fork, peer snapshot pull, restart recovery, base image pipeline pieces), Postgres persistence, the key store, metering and billing, burst capacity selection, abuse controls, and the observability stack's configuration. Everything runs against fakes and in-memory backends in tests.
 
 Not built or not proven on real infrastructure:
 
-- **Base image pipeline, the parts that need real infrastructure.** The pipeline (build plan, `build.sh`, signing, SBOM, rollout, per-size snapshot builder) exists, but no image has been built on a real builder or booted under Cloud Hypervisor yet, there is no image store to push images to hosts, and hostd still restores every VM from the single `TACHYON_BASE_SNAPSHOTS` version rather than the version a job is assigned. Builds are not yet byte-reproducible: some upstream install scripts download "latest" artifacts outside apt.
+- **Base image pipeline, the parts that need real infrastructure.** The pipeline (build plan, `build.sh`, signing, SBOM, rollout, per-size snapshot builder) exists, but no image has been built on a real builder or booted under Cloud Hypervisor yet, there is no image store to push images to hosts, and the image-to-host path (copying a built image into each host's `TACHYON_IMAGES`) is manual. Builds are not yet byte-reproducible: some upstream install scripts download "latest" artifacts outside apt.
 - **Prebuild manager in production.** Triggers, planning and dispatch exist, but trigger state is in memory, and no build has run on a real host.
 - **Actions cache object store (D4).** The protocol server writes through a `BlobStore` interface; no real store backs it yet.
 - **Mirror rollout.** `tachyon-mirror` is built and tested against fake upstreams only; provisioning the instances, TLS certificates, and feeding the git mirror the list of repos Tachyon builds (a flag for now) are not done.

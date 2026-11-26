@@ -59,6 +59,13 @@ impl Inventory {
         });
         refs.push(r);
     }
+    /// Drops the snapshot with this kind and key, if held.
+    pub fn remove(&self, kind: pb::snapshot_ref::Kind, key: &str) {
+        self.refs
+            .lock()
+            .unwrap()
+            .retain(|x| !(x.kind == kind as i32 && x.key == key));
+    }
     pub fn list(&self) -> Vec<pb::SnapshotRef> {
         self.refs.lock().unwrap().clone()
     }
