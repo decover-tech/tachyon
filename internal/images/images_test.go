@@ -178,7 +178,7 @@ func TestCrossLanguageFixture(t *testing.T) {
 		Source: Source{
 			RunnerImagesRepo: "https://github.com/actions/runner-images", RunnerImagesCommit: sha,
 			Template:         "images/ubuntu/templates/build.ubuntu-24_04.pkr.hcl",
-			BaseRootfsSHA256: sum("b"), APTSnapshot: "20261116T000000Z", PlanSHA256: sum("a"),
+			BaseRootfsSHA256: sum("b"), ActionsRunnerSHA256: sum("c"), APTSnapshot: "20261116T000000Z", PlanSHA256: sum("a"),
 		},
 		SourceDateEpoch: 1763251200,
 		Rootfs:          Blob{Path: "rootfs.ext4", SHA256: sum("1"), Size: 68719476736},
