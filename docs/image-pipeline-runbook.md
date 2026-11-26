@@ -26,10 +26,11 @@ Cannot be done from this repo alone: it needs a Linux machine with about 100 GB 
 
 ```sh
 go build -o /usr/local/bin/tachyon-image ./cmd/tachyon-image
-sudo TACHYON_IMAGE_VERSION=2026-11-16 images/ubuntu-24.04/build.sh /var/tmp/img
+CGO_ENABLED=0 go build -o /var/tmp/tachyon-guest ./cmd/tachyon-guest
+sudo GUEST_BIN=/var/tmp/tachyon-guest TACHYON_IMAGE_VERSION=2026-11-16 images/ubuntu-24.04/build.sh /var/tmp/img
 ```
 
-Optional environment: `TACHYON_IMAGE` (the `tachyon-image` binary if not on `PATH`), `TACHYON_IMAGE_VERSION` (default: this week's Monday, from `tachyon-image version`), `APT_SNAPSHOT`, `KERNEL` (a `vmlinux` to ship in the image directory).
+Required: `GUEST_BIN`, the static `tachyon-guest` binary installed into the image (hostd waits for it before snapshotting). Optional environment: `TACHYON_IMAGE` (the `tachyon-image` binary if not on `PATH`), `TACHYON_IMAGE_VERSION` (default: this week's Monday, from `tachyon-image version`), `APT_SNAPSHOT`, `KERNEL` (a `vmlinux` to ship in the image directory).
 
 Output in `/var/tmp/img`:
 

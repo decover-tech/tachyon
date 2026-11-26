@@ -30,11 +30,13 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go build -o "$RUNNER_TEMP/tachyon-image" ./cmd/tachyon-image
+      - run: CGO_ENABLED=0 go build -o "$RUNNER_TEMP/tachyon-guest" ./cmd/tachyon-guest
       - name: Build (unsigned)
         env:
           VERSION: ${{ inputs.version }}
         run: |
           sudo TACHYON_IMAGE="$RUNNER_TEMP/tachyon-image" \
+            GUEST_BIN="$RUNNER_TEMP/tachyon-guest" \
             TACHYON_IMAGE_VERSION="$VERSION" \
             images/ubuntu-24.04/build.sh "$RUNNER_TEMP/image"
       - uses: actions/upload-artifact@v4

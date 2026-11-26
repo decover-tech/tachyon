@@ -90,6 +90,8 @@ git -C "$ri" checkout -q FETCH_HEAD
 curl -fsSL --retry 3 -o "$work/base.tar.xz" "$BASE_ROOTFS_URL"
 echo "$BASE_ROOTFS_SHA256  $work/base.tar.xz" | sha256sum -c --quiet -
 
+[[ -f ${GUEST_BIN:-} ]] || die "GUEST_BIN must name the tachyon-guest binary to install (go build ./cmd/tachyon-guest)"
+
 # ---- 2. Build plan: upstream template minus image.yml's trims ---------------
 "$ti" plan -config "$here/image.yml" -runner-images "$ri" \
 	-version "$version" -apt-snapshot "$apt_snapshot" -o "$work/plan.sh"
@@ -241,9 +243,7 @@ rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 # Guest agent and its boot config. After the resets above so rootfs/ can
 # ship files (resolv.conf) that they would otherwise empty.
 # The agent must be in the image: hostd boots it before taking the snapshot.
-if [[ -n ${GUEST_BIN:-} ]]; then
-	install -D -m 0755 "$GUEST_BIN" "$root/usr/local/bin/tachyon-guest"
-fi
+install -D -m 0755 "$GUEST_BIN" "$root/usr/local/bin/tachyon-guest"
 if [[ -d $here/rootfs ]]; then
 	cp -a "$here/rootfs/." "$root/"
 fi
