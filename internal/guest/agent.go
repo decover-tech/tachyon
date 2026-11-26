@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
@@ -163,6 +164,14 @@ func (a *Agent) startDocker(ctx context.Context) {
 	if _, err := os.Stat(a.host(l.Dockerd)); err != nil {
 		return
 	}
+	// A prebuild clone carries the socket and pid file of the daemon that
+	// quiesce killed; the socket would pass the readiness check below.
+	sock := a.host("/run/docker.sock")
+	for _, f := range []string{sock, a.host("/run/docker.pid")} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			a.log().Warn("remove stale docker state", "path", f, "err", err)
+		}
+	}
 	go func() {
 		code, err := a.Sys.Run(ctx, Command{
 			Path: l.Dockerd,
@@ -177,7 +186,6 @@ func (a *Agent) startDocker(ctx context.Context) {
 		})
 		a.log().Info("dockerd exited", "code", code, "err", err)
 	}()
-	sock := a.host("/run/docker.sock")
 	deadline := time.Now().Add(dockerTimeout)
 	for time.Now().Before(deadline) {
 		if _, err := os.Stat(sock); err == nil {

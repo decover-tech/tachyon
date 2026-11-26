@@ -758,9 +758,14 @@ func TestRunJobStartsDockerInRoot(t *testing.T) {
 	e := newTestEnv(t)
 	l := e.agent.Layout
 	e.touch(t, e.root(l.Dockerd), "")
+	// Left by the prebuild's daemon, which quiesce killed.
+	e.touch(t, e.root("/run/docker.sock"), "")
 	runner := runnerOutput(successLines, 0)
 	e.sys.run = func(c Command) (int, error) {
 		if c.Path == l.Dockerd {
+			if _, err := os.Stat(e.root("/run/docker.sock")); err == nil {
+				t.Error("stale docker socket still present when dockerd starts")
+			}
 			e.touch(t, e.root("/run/docker.sock"), "")
 			return 0, nil
 		}
