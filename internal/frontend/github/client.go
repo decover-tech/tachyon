@@ -197,7 +197,8 @@ func (c *Client) do(ctx context.Context, auth, method, path string, body, out an
 		return err
 	}
 	defer resp.Body.Close()
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	// Git trees run to several MB and file contents to about 1.4 MB.
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if resp.StatusCode/100 != 2 {
 		return newAPIError(resp, data)
 	}
@@ -321,3 +322,8 @@ func (c *Client) DeleteRunner(ctx context.Context, inst int64, repo string, runn
 func (c *Client) RerunJob(ctx context.Context, inst int64, repo string, jobID int64) error {
 	return c.asInstallation(ctx, inst, http.MethodPost, fmt.Sprintf("/repos/%s/actions/jobs/%d/rerun", repo, jobID), nil, nil)
 }
+
+// maxResponseBytes caps a GitHub API response body. A truncated body fails
+// to decode, so it must hold the largest response the client asks for: a
+// recursive git tree (GitHub stops at 7 MB) or a 1 MB file's base64.
+const maxResponseBytes = 16 << 20
