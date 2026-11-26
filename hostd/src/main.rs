@@ -334,6 +334,10 @@ fn recover<S: storage::Storage>(
 ) {
     let lost = recovery::report_interrupted(outbox);
     let vms = recovery::reap_vms(&agent.hv.run_dir, &agent.hv.cgroup_parent);
+    let links = agent.hv.net.reap().unwrap_or_else(|e| {
+        tracing::warn!(error = %format!("{e:#}"), "remove orphaned VM namespaces");
+        Vec::new()
+    });
     let disks = recovery::clean_job_disks(&agent.storage).unwrap_or_else(|e| {
         tracing::warn!(error = %format!("{e:#}"), "clean orphaned job disks");
         Vec::new()
@@ -345,6 +349,7 @@ fn recover<S: storage::Storage>(
     tracing::info!(
         interrupted_jobs = lost.len(),
         orphaned_vms = vms.len(),
+        orphaned_links = links.len(),
         orphaned_disks = disks.len(),
         snapshots,
         unacked = outbox.len(),

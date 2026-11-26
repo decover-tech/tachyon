@@ -387,11 +387,34 @@ impl HostNetwork {
 
     /// Deletes the namespace, which also removes its tap and both ends of
     /// the veth pair.
+    /// Deletes the VM namespaces a previous hostd left behind (their veth
+    /// pairs go with them); slots restart at 0, so they would collide.
+    pub fn reap(&self) -> Result<Vec<String>> {
+        let list = self.run("ip", &["netns", "list"])?;
+        let stale: Vec<String> = vm_namespaces(&list).map(str::to_owned).collect();
+        for ns in &stale {
+            let _ = fs::remove_file(self.rules_dir.join(format!("{ns}.nft")));
+            self.run("ip", &["netns", "del", ns])?;
+        }
+        Ok(stale)
+    }
+
     pub fn teardown(&self, l: &VmLink) -> Result<()> {
         let _ = fs::remove_file(self.rules_dir.join(format!("{}.nft", l.netns)));
         self.run("ip", &["netns", "del", &l.netns])?;
         Ok(())
     }
+}
+
+/// The `tachyon-vm<slot>` names in `ip netns list` output, which may carry
+/// an `(id: N)` suffix.
+fn vm_namespaces(list: &str) -> impl Iterator<Item = &str> {
+    list.lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|n| {
+            n.strip_prefix("tachyon-vm")
+                .is_some_and(|s| s.parse::<u32>().is_ok())
+        })
 }
 
 /// Token bucket of 10 ms at the configured rate, at least 32 KiB.
@@ -597,6 +620,15 @@ mod tests {
                 ),
             ]))),
         }
+    }
+
+    #[test]
+    fn only_vm_namespaces_are_reaped() {
+        let list = "tachyon-vm3 (id: 3)\nsnapshot-4\ntachyon-vm0\ntachyon-vmx\nother (id: 9)\n";
+        assert_eq!(
+            vm_namespaces(list).collect::<Vec<_>>(),
+            ["tachyon-vm3", "tachyon-vm0"]
+        );
     }
 
     #[test]
