@@ -152,8 +152,9 @@ step_preflight() {
   [ -r /etc/os-release ] || die "no /etc/os-release"
   # shellcheck disable=SC1091
   . /etc/os-release
-  [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = 24.04 ] ||
+  if [ "${ID:-}" != ubuntu ] || [ "${VERSION_ID:-}" != 24.04 ]; then
     die "only Ubuntu 24.04 is supported (this host: ${PRETTY_NAME:-unknown})"
+  fi
   [ -c /dev/kvm ] || die "/dev/kvm is missing: enable virtualization in firmware, or this is a VM without nested virtualization"
   [ "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs ] || die "cgroup v2 is required"
   command -v systemctl >/dev/null || die "systemd is required"
