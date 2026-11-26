@@ -360,7 +360,9 @@ step_unit() {
 [Unit]
 Description=Tachyon host agent
 Documentation=https://github.com/decover-tech/tachyon/blob/main/docs/fleet-operations.md
-After=network-online.target zfs-import.target zfs-mount.service
+# docker.service: hostd adds its accept rules to the DOCKER-USER chain that
+# Docker creates, if Docker is installed (an After= on a missing unit is a no-op).
+After=network-online.target zfs-import.target zfs-mount.service docker.service
 Wants=network-online.target
 
 [Service]
