@@ -297,7 +297,17 @@ impl Hypervisor for CloudHypervisor {
             agent: None,
             started: Instant::now(),
         };
-        wait_for_socket(&self.api_socket(&vm), Duration::from_secs(5))?;
+        if let Err(e) = wait_for_socket(&self.api_socket(&vm), Duration::from_secs(5)) {
+            let mut vm = vm;
+            let _ = vm.child.kill();
+            let _ = vm.child.wait();
+            let mut stderr = String::new();
+            if let Some(mut pipe) = vm.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            let _ = self.destroy(vm);
+            return Err(e.context(format!("cloud-hypervisor: {}", stderr.trim())));
+        }
         Ok(vm)
     }
 

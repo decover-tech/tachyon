@@ -47,6 +47,23 @@ const READY_MARKER: &str = ".tachyon-ready";
 /// has a NIC on tap0), so prepare rebuilds older ones and hosts refuse them.
 const SNAPSHOT_FORMAT: &[u8] = b"2\n";
 
+/// The builder's VMM writes the snapshot as its own user, mode 0600; every
+/// job VM restores it under a different per-slot user. Hand it to hostd's
+/// user, read-only for everyone.
+fn seal(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid and getegid cannot fail.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    std::os::unix::fs::chown(dir, Some(uid), Some(gid))?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
+    for e in fs::read_dir(dir)? {
+        let path = e?.path();
+        std::os::unix::fs::lchown(&path, Some(uid), Some(gid))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444))?;
+    }
+    Ok(())
+}
+
 fn marker_current(path: &Path) -> bool {
     fs::read(path).is_ok_and(|c| c == SNAPSHOT_FORMAT)
 }
@@ -294,6 +311,7 @@ impl ImageStore {
             builder
                 .build(&spec, &tmp)
                 .with_context(|| format!("{image}: snapshot {vcpu} vCPU"))?;
+            seal(&tmp).with_context(|| format!("{image}: seal snapshot {vcpu} vCPU"))?;
             fs::write(tmp.join(READY_MARKER), SNAPSHOT_FORMAT)?;
             fs::rename(&tmp, &out)?;
             built.push(vcpu);
@@ -711,6 +729,24 @@ mod tests {
         let built = s.prepare("ubuntu-24.04@2026-11-16", &trusted, &b).unwrap();
         assert_eq!(built, vec![4]);
         assert_eq!(s.ready(), vec!["ubuntu-24.04@2026-11-16".to_string()]);
+    }
+
+    #[test]
+    fn prepared_snapshot_is_readable_by_every_vm_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let s = store(&tmp);
+        let k = key();
+        let dir = stage(&s, "ubuntu-24.04@2026-11-16", &k);
+        s.prepare(
+            "ubuntu-24.04@2026-11-16",
+            &[k.verifying_key()],
+            &FakeBuilder::default(),
+        )
+        .unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir.join("snapshots/4")), 0o755);
+        assert_eq!(mode(&dir.join("snapshots/4/config.json")), 0o444);
     }
 
     #[test]
