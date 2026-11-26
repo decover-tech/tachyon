@@ -72,6 +72,8 @@ func DefaultLayout() Layout {
 	}
 }
 
+const toolCache = "/opt/hostedtoolcache"
+
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
 
 // Agent runs one job (or one prebuild build) per VM.
@@ -407,6 +409,10 @@ func (a *Agent) env(extra map[string]string) []string {
 		"LANG":               "C.UTF-8",
 		"PATH":               defaultPath,
 		"TACHYON_WARM_STASH": a.Layout.WarmStash,
+		// As on GitHub-hosted runners: setup-node/python/go find the image's
+		// (and the prebuild's) toolchains here, not in the runner's _work/_tool.
+		"AGENT_TOOLSDIRECTORY": toolCache,
+		"RUNNER_TOOL_CACHE":    toolCache,
 	}
 	for k, v := range extra {
 		m[k] = v
