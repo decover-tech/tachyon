@@ -35,6 +35,10 @@ type Layout struct {
 	// Home is the runner user's home, inside Root. "~/" paths resolve here.
 	Home     string
 	UID, GID int
+	// Dockerd is the Docker daemon started for each job, inside Root
+	// ("" = none). The base image's own dockerd can't serve jobs: its
+	// /var/lib/docker is on the read-only root, not the job's volume.
+	Dockerd string
 	// RunnerCmd is the GitHub runner's run.sh, inside Root.
 	RunnerCmd string
 	// Workspace is where prebuild warm steps run and where jobs find the
@@ -57,6 +61,7 @@ func DefaultLayout() Layout {
 		Home:      "/home/runner",
 		UID:       1001,
 		GID:       1001,
+		Dockerd:   "/usr/bin/dockerd",
 		RunnerCmd: "/home/runner/actions-runner/run.sh",
 		Workspace: "/home/runner/work/_tachyon/workspace",
 		WarmStash: "/opt/tachyon/warm",
@@ -79,6 +84,10 @@ type Agent struct {
 // quiesceTimeout bounds how long Serve waits for the job's processes to
 // die and its filesystems to unmount before reporting.
 const quiesceTimeout = 30 * time.Second
+
+// dockerTimeout bounds the wait for dockerd's socket. A job that doesn't use
+// Docker still runs if it never appears.
+const dockerTimeout = 30 * time.Second
 
 // Serve reads one payload from conn, runs it, and writes the result back.
 // The caller powers the VM off afterwards.
@@ -132,6 +141,7 @@ func (a *Agent) run(ctx context.Context, p *Payload, res *Result) (int, error) {
 		return 0, fmt.Errorf("write files: %w", err)
 	}
 	env := a.env(p.Env)
+	a.startDocker(ctx)
 	if p.Prebuild != nil {
 		return a.prebuild(ctx, p, env, res)
 	}
@@ -139,6 +149,43 @@ func (a *Agent) run(ctx context.Context, p *Payload, res *Result) (int, error) {
 		return 0, fmt.Errorf("stash warm paths: %w", err)
 	}
 	return a.runRunner(ctx, p, env, res)
+}
+
+// startDocker starts dockerd as root inside the job's root, where
+// /var/lib/docker is the job's docker volume, and waits for its socket.
+// Quiesce stops it with everything else the job left running.
+func (a *Agent) startDocker(ctx context.Context) {
+	l := a.Layout
+	if l.Dockerd == "" {
+		return
+	}
+	if _, err := os.Stat(a.host(l.Dockerd)); err != nil {
+		return
+	}
+	go func() {
+		code, err := a.Sys.Run(ctx, Command{
+			Path:   l.Dockerd,
+			Env:    []string{"PATH=" + defaultPath},
+			Dir:    "/",
+			Root:   l.Root,
+			Stdout: a.output(),
+			Stderr: a.output(),
+		})
+		a.log().Info("dockerd exited", "code", code, "err", err)
+	}()
+	sock := a.host("/run/docker.sock")
+	deadline := time.Now().Add(dockerTimeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sock); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	a.log().Warn("dockerd socket did not appear", "timeout", dockerTimeout)
 }
 
 func (a *Agent) quiesce(ctx context.Context) error {

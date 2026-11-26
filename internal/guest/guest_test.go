@@ -753,3 +753,35 @@ func TestPhaseWatcherKeepsFirstTimestamp(t *testing.T) {
 		t.Fatalf("phases = %v result = %q", w.Phases(), w.Result())
 	}
 }
+
+func TestRunJobStartsDockerInRoot(t *testing.T) {
+	e := newTestEnv(t)
+	l := e.agent.Layout
+	e.touch(t, e.root(l.Dockerd), "")
+	runner := runnerOutput(successLines, 0)
+	e.sys.run = func(c Command) (int, error) {
+		if c.Path == l.Dockerd {
+			e.touch(t, e.root("/run/docker.sock"), "")
+			return 0, nil
+		}
+		return runner(c)
+	}
+
+	if res := e.agent.Run(context.Background(), jobPayload()); res.ExitCode != 0 {
+		t.Fatalf("exit code %d; logs:\n%s", res.ExitCode, e.logs)
+	}
+	e.sys.mu.Lock()
+	defer e.sys.mu.Unlock()
+	var dockerd *Command
+	for i := range e.sys.runs {
+		if e.sys.runs[i].Path == l.Dockerd {
+			dockerd = &e.sys.runs[i]
+		}
+	}
+	if dockerd == nil {
+		t.Fatal("dockerd not started")
+	}
+	if dockerd.Root != l.Root || dockerd.UID != 0 {
+		t.Errorf("dockerd root=%q uid=%d, want %q as root", dockerd.Root, dockerd.UID, l.Root)
+	}
+}
