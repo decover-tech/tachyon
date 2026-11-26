@@ -28,6 +28,8 @@ type secretRule struct {
 	// chunks holding one, as it is far slower than a byte search and a
 	// warm target/ or toolchain is gigabytes of binaries.
 	markers [][]byte
+	// sample reports whether a match is a documented placeholder.
+	sample func(match []byte) bool
 }
 
 func markers(m ...string) [][]byte {
@@ -42,12 +44,18 @@ func markers(m ...string) [][]byte {
 // every job on the repo, including untrusted pull requests, so a hit fails
 // the prebuild rather than being reported and kept.
 var secretRules = []secretRule{
-	{"github-token", regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b`), markers("ghp_", "gho_", "ghu_", "ghs_", "ghr_")},
-	{"github-fine-grained-pat", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{82}\b`), markers("github_pat_")},
-	{"aws-access-key-id", regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`), markers("AKIA", "ASIA")},
-	{"npm-token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), markers("npm_")},
-	{"slack-token", regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`), markers("xox")},
-	{"private-key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----`), markers("-----BEGIN ")},
+	{"github-token", regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b`), markers("ghp_", "gho_", "ghu_", "ghs_", "ghr_"), nil},
+	{"github-fine-grained-pat", regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{82}\b`), markers("github_pat_"), nil},
+	// AWS's documentation and SDKs use keys ending in EXAMPLE
+	// (AKIAIOSFODNN7EXAMPLE); test fixtures and the SDKs carry them.
+	{"aws-access-key-id", regexp.MustCompile(`\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`), markers("AKIA", "ASIA"), func(m []byte) bool {
+		return bytes.HasSuffix(m, []byte("EXAMPLE"))
+	}},
+	{"npm-token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), markers("npm_"), nil},
+	{"slack-token", regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`), markers("xox"), nil},
+	// A key, not just its header: PEM/PGP parsers (rustls, pem, cargo)
+	// contain the header line as a string constant.
+	{"private-key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----\r?\n(?:[A-Za-z-]+: [^\r\n]*\r?\n)*(?:\r?\n)?[A-Za-z0-9+/=]{60}`), markers("-----BEGIN "), nil},
 }
 
 // registryDirs hold packages downloaded from public registries, whose docs
@@ -138,6 +146,18 @@ func ScanSecrets(dir string, literals [][]byte) ([]Finding, error) {
 	return out, nil
 }
 
+func (r secretRule) matches(b []byte) bool {
+	if r.sample == nil {
+		return r.re.Match(b)
+	}
+	for _, m := range r.re.FindAll(b, -1) {
+		if !r.sample(m) {
+			return true
+		}
+	}
+	return false
+}
+
 func containsAny(b []byte, needles [][]byte) bool {
 	for _, n := range needles {
 		if bytes.Contains(b, n) {
@@ -167,7 +187,7 @@ func scanFile(p string, literals [][]byte, rules bool) ([]string, error) {
 		n, rerr := io.ReadFull(f, chunk)
 		buf = append(buf, chunk[:n]...)
 		for _, r := range secretRules {
-			if rules && !seen[r.name] && containsAny(buf, r.markers) && r.re.Match(buf) {
+			if rules && !seen[r.name] && containsAny(buf, r.markers) && r.matches(buf) {
 				hit(r.name)
 			}
 		}

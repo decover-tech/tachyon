@@ -15,7 +15,7 @@ func TestScanSecretsRules(t *testing.T) {
 		"aws-access-key-id":       "AKIA" + strings.Repeat("Z", 16),
 		"npm-token":               "//registry.npmjs.org/:_authToken=npm_" + strings.Repeat("b", 36),
 		"slack-token":             "xoxb-1234567890-abcdef",
-		"private-key":             "-----BEGIN OPENSSH PRIVATE KEY-----\nabc",
+		"private-key":             "-----BEGIN OPENSSH PRIVATE KEY-----\n" + strings.Repeat("b3BlbnNzaC1rZXktdjEAAAAA", 3) + "\n",
 	}
 	for rule, body := range tests {
 		t.Run(rule, func(t *testing.T) {
@@ -66,7 +66,7 @@ func TestScanSecretsClean(t *testing.T) {
 
 func TestScanSecretsRegistryDirs(t *testing.T) {
 	dir := t.TempDir()
-	key := "-----BEGIN RSA PRIVATE KEY-----\nabc"
+	key := "-----BEGIN RSA PRIVATE KEY-----\n" + strings.Repeat("MIIEpAIBAAKCAQEA", 4) + "\n"
 	files := map[string]string{
 		"home/runner/work/app/node_modules/selfsigned/README.md": key,
 		"opt/py/lib/python3.11/site-packages/x/tests/key.pem":    key,
@@ -118,5 +118,26 @@ func TestScanSecretsMissingDir(t *testing.T) {
 	got, err := ScanSecrets(filepath.Join(t.TempDir(), "nope"), nil)
 	if err != nil || got != nil {
 		t.Fatalf("got %v, %v", got, err)
+	}
+}
+
+func TestScanSecretsIgnoresSamplesAndBareHeaders(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"faults.py":      `key = "AKIAIOSFODNN7EXAMPLE"`,
+		"librustls.rlib": "\x00-----BEGIN PRIVATE KEY-----\x00-----END PRIVATE KEY-----",
+		"pgp.asc":        "-----BEGIN PGP PRIVATE KEY BLOCK-----\nVersion: x\n\n" + strings.Repeat("lQOYBF", 12) + "\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ScanSecrets(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []Finding{{Path: "/pgp.asc", Rule: "private-key"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings = %v, want only the armored PGP key", got)
 	}
 }
