@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // Finding is one secret-scan hit. It names the file and rule, never the
@@ -34,6 +35,25 @@ var secretRules = []secretRule{
 	{"private-key", regexp.MustCompile(`-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----`)},
 }
 
+// registryDirs hold packages downloaded from public registries, whose docs
+// and test fixtures are full of sample keys (dotenv's README, selfsigned,
+// the AWS SDK's AKIA...EXAMPLE). Only the literal secrets the guest actually
+// handed the build (clone token, runner config) are looked for in them.
+var registryDirs = []string{
+	"/node_modules/", "/site-packages/", "/dist-packages/",
+	"/.npm/_cacache/", "/.cache/pip/", "/.cargo/registry/",
+}
+
+func fromRegistry(rel string) bool {
+	rel = "/" + filepath.ToSlash(rel)
+	for _, d := range registryDirs {
+		if strings.Contains(rel, d) {
+			return true
+		}
+	}
+	return false
+}
+
 const (
 	scanChunk = 1 << 20
 	// scanOverlap is longer than any rule's match, so a token split across
@@ -58,7 +78,7 @@ func ScanSecrets(dir string, literals [][]byte) ([]Finding, error) {
 			return nil
 		}
 		rel, _ := filepath.Rel(dir, p)
-		hits, err := scanFile(p, literals)
+		hits, err := scanFile(p, literals, !fromRegistry(rel))
 		if err != nil {
 			return err
 		}
@@ -70,7 +90,7 @@ func ScanSecrets(dir string, literals [][]byte) ([]Finding, error) {
 	return out, err
 }
 
-func scanFile(p string, literals [][]byte) ([]string, error) {
+func scanFile(p string, literals [][]byte, rules bool) ([]string, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return nil, err
@@ -90,7 +110,7 @@ func scanFile(p string, literals [][]byte) ([]string, error) {
 		n, rerr := io.ReadFull(f, chunk)
 		buf = append(buf, chunk[:n]...)
 		for _, r := range secretRules {
-			if r.re.Match(buf) {
+			if rules && r.re.Match(buf) {
 				hit(r.name)
 			}
 		}

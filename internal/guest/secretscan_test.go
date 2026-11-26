@@ -64,6 +64,37 @@ func TestScanSecretsClean(t *testing.T) {
 	}
 }
 
+func TestScanSecretsRegistryDirs(t *testing.T) {
+	dir := t.TempDir()
+	key := "-----BEGIN RSA PRIVATE KEY-----\nabc"
+	files := map[string]string{
+		"home/runner/work/app/node_modules/selfsigned/README.md": key,
+		"opt/py/lib/python3.11/site-packages/x/tests/key.pem":    key,
+		"home/runner/work/app/node_modules/x/cache.json":         "cached: runner-secret",
+		"home/runner/work/app/certs/dev.pem":                     key,
+	}
+	for name, body := range files {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := ScanSecrets(dir, [][]byte{[]byte("runner-secret")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Finding{
+		{Path: "/home/runner/work/app/certs/dev.pem", Rule: "private-key"},
+		{Path: "/home/runner/work/app/node_modules/x/cache.json", Rule: "runner-config"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings = %v", got)
+	}
+}
+
 func TestScanSecretsAcrossChunkBoundary(t *testing.T) {
 	dir := t.TempDir()
 	token := "ghp_" + strings.Repeat("c", 36)
