@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -164,7 +165,10 @@ func (a *Agent) startDocker(ctx context.Context) {
 	}
 	go func() {
 		code, err := a.Sys.Run(ctx, Command{
-			Path:   l.Dockerd,
+			Path: l.Dockerd,
+			// Steps run with no supplementary groups, so the socket's
+			// group must be the runner's own.
+			Args:   []string{"--group", strconv.Itoa(l.GID)},
 			Env:    []string{"PATH=" + defaultPath},
 			Dir:    "/",
 			Root:   l.Root,

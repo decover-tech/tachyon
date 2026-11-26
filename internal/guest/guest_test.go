@@ -784,4 +784,7 @@ func TestRunJobStartsDockerInRoot(t *testing.T) {
 	if dockerd.Root != l.Root || dockerd.UID != 0 {
 		t.Errorf("dockerd root=%q uid=%d, want %q as root", dockerd.Root, dockerd.UID, l.Root)
 	}
+	if want := []string{"--group", "1001"}; !reflect.DeepEqual(dockerd.Args, want) {
+		t.Errorf("dockerd args = %q, want %q (socket group the runner has)", dockerd.Args, want)
+	}
 }
