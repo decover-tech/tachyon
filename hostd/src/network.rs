@@ -396,6 +396,12 @@ impl HostNetwork {
             let _ = fs::remove_file(self.rules_dir.join(format!("{ns}.nft")));
             self.run("ip", &["netns", "del", ns])?;
         }
+        // The kernel frees a deleted namespace, and the veth pair in it,
+        // asynchronously; delete the host ends now so setup can reuse them.
+        let links = self.run("ip", &["-o", "link", "show", "type", "veth"])?;
+        for veth in host_veths(&links) {
+            self.run("ip", &["link", "del", veth])?;
+        }
         Ok(stale)
     }
 
@@ -413,6 +419,17 @@ fn vm_namespaces(list: &str) -> impl Iterator<Item = &str> {
         .filter_map(|l| l.split_whitespace().next())
         .filter(|n| {
             n.strip_prefix("tachyon-vm")
+                .is_some_and(|s| s.parse::<u32>().is_ok())
+        })
+}
+
+/// The `tvh<slot>` names in `ip -o link show` output (`7: tvh0@if2: <...`).
+fn host_veths(list: &str) -> impl Iterator<Item = &str> {
+    list.lines()
+        .filter_map(|l| l.split(": ").nth(1))
+        .map(|n| n.split('@').next().unwrap_or(n))
+        .filter(|n| {
+            n.strip_prefix(HOST_VETH_PREFIX)
                 .is_some_and(|s| s.parse::<u32>().is_ok())
         })
 }
@@ -629,6 +646,12 @@ mod tests {
             vm_namespaces(list).collect::<Vec<_>>(),
             ["tachyon-vm3", "tachyon-vm0"]
         );
+    }
+
+    #[test]
+    fn only_vm_host_veths_are_reaped() {
+        let list = "7: tvh0@if2: <BROADCAST,UP> mtu 1500\n9: tvhx@if2: <UP>\n11: veth1@if3: <UP>\n12: tvh12: <UP>\n";
+        assert_eq!(host_veths(list).collect::<Vec<_>>(), ["tvh0", "tvh12"]);
     }
 
     #[test]
