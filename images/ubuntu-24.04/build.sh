@@ -120,6 +120,16 @@ mkdir -p "$ig/helpers" "$ig/installers"
 cp -a "$up/scripts/helpers/." "$ig/helpers/"
 cp -a "$up/scripts/build/." "$ig/installers/"
 cp "$ri/$RUNNER_IMAGES_TOOLSET" "$ig/installers/toolset.json"
+# Microsoft.Graph is dozens of PowerShell Gallery packages whose downloads
+# fail intermittently and fail the build; Linux jobs rarely use it. Pester,
+# which the upstream install tests need, stays.
+python3 - "$ig/installers/toolset.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+t = json.load(open(p))
+t["powershellModules"] = [m for m in t["powershellModules"] if m["name"] != "Microsoft.Graph"]
+json.dump(t, open(p, "w"), indent=4)
+PY
 cp -a "$up/assets/post-gen" "$ig/post-generation"
 cp -a "$up/scripts/tests" "$ig/tests"
 cp -a "$up/scripts/docs-gen" "$ig/SoftwareReport"
