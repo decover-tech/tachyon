@@ -287,19 +287,42 @@ func (s *LinuxSystem) PowerOff() error {
 }
 
 // AcceptVsock listens on the vsock port and returns the first connection.
-// hostd connects exactly once per VM.
-func AcceptVsock(port uint32) (io.ReadWriteCloser, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+// hostd connects exactly once per VM. Once the job port is listening it also
+// serves readyPort (if non-zero), so hostd's readiness probe before the base
+// snapshot can never see an agent that is not yet accepting jobs.
+func AcceptVsock(port, readyPort uint32) (io.ReadWriteCloser, error) {
+	fd, err := listenVsock(port)
 	if err != nil {
-		return nil, fmt.Errorf("vsock socket: %w", err)
+		return nil, err
 	}
 	defer unix.Close(fd)
+	if readyPort != 0 {
+		rfd, err := listenVsock(readyPort)
+		if err != nil {
+			return nil, err
+		}
+		go serveReady(rfd)
+	}
+	return acceptVsock(fd)
+}
+
+func listenVsock(port uint32) (int, error) {
+	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("vsock socket: %w", err)
+	}
 	if err := unix.Bind(fd, &unix.SockaddrVM{CID: unix.VMADDR_CID_ANY, Port: port}); err != nil {
-		return nil, fmt.Errorf("vsock bind %d: %w", port, err)
+		unix.Close(fd)
+		return -1, fmt.Errorf("vsock bind %d: %w", port, err)
 	}
 	if err := unix.Listen(fd, 1); err != nil {
-		return nil, fmt.Errorf("vsock listen: %w", err)
+		unix.Close(fd)
+		return -1, fmt.Errorf("vsock listen: %w", err)
 	}
+	return fd, nil
+}
+
+func acceptVsock(fd int) (io.ReadWriteCloser, error) {
 	for {
 		nfd, _, err := unix.Accept4(fd, unix.SOCK_CLOEXEC)
 		if errors.Is(err, unix.EINTR) {
@@ -309,5 +332,17 @@ func AcceptVsock(port uint32) (io.ReadWriteCloser, error) {
 			return nil, fmt.Errorf("vsock accept: %w", err)
 		}
 		return os.NewFile(uintptr(nfd), "vsock"), nil
+	}
+}
+
+// serveReady accepts and closes every connection: a successful connect is
+// the readiness signal.
+func serveReady(fd int) {
+	for {
+		c, err := acceptVsock(fd)
+		if err != nil {
+			return
+		}
+		c.Close()
 	}
 }

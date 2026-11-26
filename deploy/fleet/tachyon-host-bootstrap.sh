@@ -273,7 +273,7 @@ root=$(dirname "$CG")
 echo "+cpu +memory" >"$root/cgroup.subtree_control" 2>/dev/null || true
 mkdir -p "$CG"
 echo "+cpu +memory" >"$CG/cgroup.subtree_control"
-mkdir -p "${TACHYON_RUN_DIR:-/run/tachyon/vms}"
+mkdir -p "${TACHYON_RUN_DIR:-/run/tachyon/vms}" /run/tachyon/vm
 E
 }
 

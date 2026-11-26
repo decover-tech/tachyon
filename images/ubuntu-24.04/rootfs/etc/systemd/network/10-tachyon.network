@@ -1,0 +1,7 @@
+# Same in every VM (see hostd/src/network.rs): one base snapshot serves every slot.
+[Match]
+Type=ether
+
+[Network]
+Address=172.16.0.2/30
+Gateway=172.16.0.1

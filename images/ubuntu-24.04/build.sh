@@ -13,7 +13,8 @@
 # git, xz, sha256sum and e2fsprogs >= 1.47.1 (for E2FSPROGS_FAKE_TIME and
 # mkfs.ext4 -d), and tachyon-image (go build ./cmd/tachyon-image).
 #
-#   sudo images/ubuntu-24.04/build.sh /var/tmp/img
+#   CGO_ENABLED=0 go build -o /var/tmp/tachyon-guest ./cmd/tachyon-guest
+#   sudo GUEST_BIN=/var/tmp/tachyon-guest images/ubuntu-24.04/build.sh /var/tmp/img
 #   tachyon-image sign -key /secure/key.pem -o /var/tmp/img/manifest.signed.json /var/tmp/img/manifest.json
 #
 # build.sh never signs. It runs upstream install scripts as root in a
@@ -41,6 +42,7 @@ ti=${TACHYON_IMAGE:-tachyon-image}
 
 [[ $(uname -s) == Linux ]] || { echo "build.sh runs on Linux" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || { echo "build.sh must run as root (it chroots into the image)" >&2; exit 1; }
+[[ -f ${GUEST_BIN:-} ]] || { echo "GUEST_BIN must name the tachyon-guest binary to install (CGO_ENABLED=0 go build ./cmd/tachyon-guest)" >&2; exit 1; }
 
 eval "$("$ti" env -config "$here/image.yml")"
 version=${TACHYON_IMAGE_VERSION:-$("$ti" version)}
@@ -56,8 +58,21 @@ work=$(mktemp -d /var/tmp/tachyon-image.XXXXXX)
 root=$work/root
 mounts=()
 
+# stop_dockerd stops the dockerd that the systemctl shim (below) started.
+stop_dockerd() {
+	local pid _
+	pid=$(cat "$root/run/docker.pid" 2>/dev/null) || return 0
+	kill "$pid" 2>/dev/null || return 0
+	for _ in $(seq 30); do
+		kill -0 "$pid" 2>/dev/null || return 0
+		sleep 1
+	done
+	kill -9 "$pid" 2>/dev/null || true
+}
+
 cleanup() {
 	local i
+	stop_dockerd
 	for ((i = ${#mounts[@]} - 1; i >= 0; i--)); do
 		umount -l "${mounts[i]}" 2>/dev/null || true
 	done
@@ -77,6 +92,7 @@ git -C "$ri" checkout -q FETCH_HEAD
 curl -fsSL --retry 3 -o "$work/base.tar.xz" "$BASE_ROOTFS_URL"
 echo "$BASE_ROOTFS_SHA256  $work/base.tar.xz" | sha256sum -c --quiet -
 
+
 # ---- 2. Build plan: upstream template minus image.yml's trims ---------------
 "$ti" plan -config "$here/image.yml" -runner-images "$ri" \
 	-version "$version" -apt-snapshot "$apt_snapshot" -o "$work/plan.sh"
@@ -91,15 +107,62 @@ bind() {
 	mount "$@"
 	mounts+=("${@: -1}")
 }
+# Make the root a mount point, as on a real VM: upstream steps inspect it
+# with findmnt (configure-environment.sh requires ext4).
+bind --bind "$root" "$root"
 bind -t proc proc "$root/proc"
 bind -t sysfs sys "$root/sys"
 bind --bind /dev "$root/dev"
 bind -t devpts devpts "$root/dev/pts"
 bind -t tmpfs tmpfs "$root/run"
+rm -f "$root/etc/resolv.conf"
 cp -L /etc/resolv.conf "$root/etc/resolv.conf"
 # No services start inside the chroot.
 printf '#!/bin/sh\nexit 101\n' >"$root/usr/sbin/policy-rc.d"
+# The guest boots its kernel directly, without a bootloader; upstream still
+# runs update-grub, so give it a no-op when the base has no grub.
+grub_stub=0
+if [[ ! -e $root/usr/sbin/update-grub ]]; then
+	printf '#!/bin/sh\nexit 0\n' >"$root/usr/sbin/update-grub"
+	chmod 755 "$root/usr/sbin/update-grub"
+	grub_stub=1
+fi
 chmod 755 "$root/usr/sbin/policy-rc.d"
+# install-docker.sh starts Docker, then pulls images into it and tests the
+# server. A systemctl shim, earlier on PATH than the real one, runs dockerd
+# directly for docker.service; other calls go to the real systemctl. dockerd
+# shares the host's network namespace, so it creates no bridge or iptables
+# rules. Removed, with dockerd stopped, before the image is sealed.
+bind --bind /sys/fs/cgroup "$root/sys/fs/cgroup"
+cat >"$root/usr/local/sbin/systemctl" <<'SH'
+#!/bin/bash
+# Image build shim; see build.sh. Not in the finished image.
+if [[ "$*" == *docker.service* || "$*" == *" docker" ]]; then
+	running() { docker version >/dev/null 2>&1; }
+	case $1 in
+	is-active)
+		running && exit 0
+		exit 3
+		;;
+	start | restart)
+		running && exit 0
+		setsid dockerd --pidfile /run/docker.pid --bridge=none --iptables=false --ip6tables=false \
+			>>/var/log/dockerd-build.log 2>&1 </dev/null &
+		for _ in $(seq 60); do
+			running && exit 0
+			sleep 1
+		done
+		echo "dockerd did not start; see /var/log/dockerd-build.log" >&2
+		exit 1
+		;;
+	esac
+fi
+exec /usr/bin/systemctl "$@"
+SH
+chmod 755 "$root/usr/local/sbin/systemctl"
+# No journald runs in the chroot; cleanup.sh's journalctl calls would fail.
+printf '#!/bin/sh\n# Image build shim; see build.sh. Not in the finished image.\nexit 0\n' >"$root/usr/local/sbin/journalctl"
+chmod 755 "$root/usr/local/sbin/journalctl"
 
 # Upstream's file provisioners.
 ig=$root/imagegeneration
@@ -108,8 +171,29 @@ mkdir -p "$ig/helpers" "$ig/installers"
 cp -a "$up/scripts/helpers/." "$ig/helpers/"
 cp -a "$up/scripts/build/." "$ig/installers/"
 cp "$ri/$RUNNER_IMAGES_TOOLSET" "$ig/installers/toolset.json"
+# Microsoft.Graph is dozens of PowerShell Gallery packages whose downloads
+# fail intermittently and fail the build; Linux jobs rarely use it. Pester,
+# which the upstream install tests need, stays.
+python3 - "$ig/installers/toolset.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+t = json.load(open(p))
+t["powershellModules"] = [m for m in t["powershellModules"] if m["name"] != "Microsoft.Graph"]
+json.dump(t, open(p, "w"), indent=4)
+PY
 cp -a "$up/assets/post-gen" "$ig/post-generation"
 cp -a "$up/scripts/tests" "$ig/tests"
+# Tests that start a service need a booted systemd, and policy-rc.d blocks
+# starts in the chroot. Skip them here; booting the image covers services.
+python3 - "$ig/tests" <<'PY'
+import pathlib, re, sys
+for f in pathlib.Path(sys.argv[1]).glob("*.Tests.ps1"):
+    parts = re.split(r'(?m)^(?=\s*It ")', f.read_text())
+    f.write_text("".join(
+        re.sub(r'^(\s*It "[^"]*")', r"\1 -Skip", p, count=1)
+        if p.lstrip().startswith('It "') and "systemctl start" in p else p
+        for p in parts))
+PY
 cp -a "$up/scripts/docs-gen" "$ig/SoftwareReport"
 cp -a "$ri/helpers/software-report-base/." "$ig/SoftwareReport/"
 chmod -R a+rx "$ig/installers"
@@ -117,6 +201,10 @@ chmod -R a+rx "$ig/installers"
 # The runner user GitHub's image has; upstream's non-sudo steps run as it.
 chroot "$root" id runner >/dev/null 2>&1 || chroot "$root" useradd -m -u 1001 -s /bin/bash runner
 
+# Packer runs each upstream step in a new login session, which loads
+# /etc/environment (AGENT_TOOLSDIRECTORY, the PATH earlier steps extended).
+# shellcheck disable=SC2016 # expanded inside the chroot
+load_env='set -a; if [[ -r /etc/environment ]]; then . /etc/environment; fi; set +a;'
 # run_step <root|user> <sh|pwsh> <script> [KEY=VALUE...], called by plan.sh.
 run_step() {
 	local who=$1 shell=$2 script=$3
@@ -129,7 +217,7 @@ run_step() {
 	chroot "${spec[@]}" "$root" /usr/bin/env -i \
 		PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 		HOME="$([[ $who == user ]] && echo /home/runner || echo /root)" \
-		LANG=C.UTF-8 "$@" "${cmd[@]}"
+		LANG=C.UTF-8 "$@" /bin/bash -c "$load_env"' exec "$@"' step "${cmd[@]}"
 }
 # shellcheck source=/dev/null
 source "$work/plan.sh"
@@ -144,13 +232,22 @@ if [[ -d $root/opt/hostedtoolcache ]]; then
 fi
 
 # ---- 5. Normalize for reproducibility ---------------------------------------
+stop_dockerd
 for ((i = ${#mounts[@]} - 1; i >= 0; i--)); do umount -l "${mounts[i]}"; done
 mounts=()
-rm -f "$root/usr/sbin/policy-rc.d" "$root/etc/ssh/"ssh_host_*
+rm -f "$root/usr/sbin/policy-rc.d" "$root/usr/local/sbin/systemctl" "$root/usr/local/sbin/journalctl" "$root/run/docker.pid" "$root/etc/ssh/"ssh_host_*
+if [[ $grub_stub == 1 ]]; then rm -f "$root/usr/sbin/update-grub"; fi
 rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 	"$root"/tmp/* "$root"/var/tmp/* "$root"/root/.cache "$root"/home/runner/.cache
 : >"$root/etc/machine-id"
 : >"$root/etc/resolv.conf"
+# Guest agent and its boot config. After the resets above so rootfs/ can
+# ship files (resolv.conf) that they would otherwise empty.
+# The agent must be in the image: hostd boots it before taking the snapshot.
+install -D -m 0755 "$GUEST_BIN" "$root/usr/local/bin/tachyon-guest"
+if [[ -d $here/rootfs ]]; then
+	cp -a "$here/rootfs/." "$root/"
+fi
 find "$root" -xdev -newermt "@$SOURCE_DATE_EPOCH" -print0 |
 	xargs -0r touch --no-dereference --date="@$SOURCE_DATE_EPOCH"
 

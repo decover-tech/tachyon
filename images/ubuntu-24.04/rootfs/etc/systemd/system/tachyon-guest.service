@@ -1,0 +1,15 @@
+[Unit]
+Description=Tachyon guest agent
+After=systemd-networkd.service
+DefaultDependencies=no
+
+[Service]
+# The job overlay's lower layer (Layout.BaseRoot): the read-only base image
+# alone, without the mounts on top of /.
+ExecStartPre=/bin/mkdir -p /run/tachyon/base
+ExecStartPre=/bin/mount --bind -o ro / /run/tachyon/base
+ExecStart=/usr/local/bin/tachyon-guest
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
