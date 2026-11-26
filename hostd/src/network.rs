@@ -274,6 +274,26 @@ impl HostNetwork {
         fs::create_dir_all(&self.rules_dir)?;
         fs::write(&path, render_host_rules())?;
         self.run("nft", &["-f", &path.to_string_lossy()])?;
+        self.allow_past_docker()
+    }
+
+    /// Docker's iptables FORWARD chain drops whatever isn't for its bridge,
+    /// and a drop in any nft base chain is final, so on a host running
+    /// Docker no VM traffic leaves. DOCKER-USER is Docker's hook for this.
+    fn allow_past_docker(&self) -> Result<()> {
+        if self.run("iptables", &["-S", "DOCKER-USER"]).is_err() {
+            return Ok(());
+        }
+        let veths = format!("{HOST_VETH_PREFIX}+");
+        for dir in ["-i", "-o"] {
+            let rule = [dir, veths.as_str(), "-j", "ACCEPT"];
+            if self
+                .run("iptables", &[&["-C", "DOCKER-USER"][..], &rule].concat())
+                .is_err()
+            {
+                self.run("iptables", &[&["-I", "DOCKER-USER"][..], &rule].concat())?;
+            }
+        }
         Ok(())
     }
 
@@ -880,6 +900,20 @@ mod tests {
             rec.log.lock().unwrap()[0],
             "sysctl -qw net.ipv4.ip_forward=1"
         );
+    }
+
+    #[test]
+    fn vm_traffic_is_let_past_docker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rec = Recorder {
+            fail_on: Some("iptables -C".into()),
+            ..Default::default()
+        };
+        let n = net(&rec, tmp.path());
+        n.init_host().unwrap();
+        let log = rec.log.lock().unwrap();
+        assert!(log.contains(&"iptables -I DOCKER-USER -i tvh+ -j ACCEPT".to_string()));
+        assert!(log.contains(&"iptables -I DOCKER-USER -o tvh+ -j ACCEPT".to_string()));
     }
 
     #[test]
