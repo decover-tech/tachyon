@@ -194,6 +194,26 @@ E
   run sysctl --system
 }
 
+# Base snapshots hold full guest memory (4 GiB per vCPU, about 120 GB for
+# sizes 2-16 per image version): too big for the root volume.
+zfs_images() {
+  local ds="$ZFS_POOL/images"
+  if [ "$DRY_RUN" = 1 ]; then
+    run zfs create -p -o mountpoint="$IMAGES" "$ds"
+    return
+  fi
+  if ! zfs list -H -o name "$ds" >/dev/null 2>&1; then
+    # Mounting over a populated store would hide its images from hostd
+    # while they keep filling the root volume.
+    if [ -d "$IMAGES" ] && [ -n "$(ls -A "$IMAGES")" ]; then
+      die "$IMAGES already holds images on the root volume: move them aside, rerun, then copy them into $IMAGES"
+    fi
+    run zfs create -p -o mountpoint="$IMAGES" "$ds"
+  fi
+  [ "$(findmnt -n -o SOURCE --target "$IMAGES")" = "$ds" ] ||
+    die "$IMAGES is not mounted from $ds; prepare-image would fill the root volume"
+}
+
 step_zfs() {
   local pool exists=0
   pool=$(pool_name)
@@ -227,11 +247,7 @@ step_zfs() {
   if [ "$pool" != "$ZFS_POOL" ]; then
     run zfs create -p -o mountpoint=none "$ZFS_POOL" || say "dataset $ZFS_POOL exists"
   fi
-  if [ -n "$IMAGES" ]; then
-    # Base snapshots hold full guest memory (4 GiB per vCPU, about 120 GB
-    # for sizes 2-16 per image version): too big for the root volume.
-    run zfs create -p -o mountpoint="$IMAGES" "$ZFS_POOL/images" || say "dataset $ZFS_POOL/images exists"
-  fi
+  [ -z "$IMAGES" ] || zfs_images
   write_file /etc/modprobe.d/zfs-tachyon.conf 0644 <<E
 # Managed by tachyon-host-bootstrap.sh. Caps the ARC so VM memory is not
 # starved; starting value, not measured. Applies at next module load.
