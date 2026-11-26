@@ -108,6 +108,8 @@ chmod 0444 "$TACHYON_IMAGES/ubuntu-24.04@2026-11-16/rootfs.ext4"
 
 Needs a Linux host with KVM, Cloud Hypervisor, `ch-remote`, cgroup v2, and root. Cannot be done from this repo alone.
 
+The cpu and memory controllers must be enabled under `TACHYON_CGROUP`, or the first boot fails with `write .../cpu.weight: Permission denied`. The hostd unit does this in `ExecStartPre`; when running `prepare-image` by hand (or after a reboot without starting hostd), run `/usr/local/lib/tachyon/prepare-host.sh` first.
+
 ```sh
 export TACHYON_IMAGES=/var/lib/tachyon/images-store
 export TACHYON_IMAGE_TRUST=/etc/tachyon/image-trust.pem      # public key(s) from step 2

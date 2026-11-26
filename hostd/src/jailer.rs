@@ -63,6 +63,10 @@ impl JailSpec {
 
     /// Configures `cmd` to start inside the jail.
     pub fn apply(&self, cmd: &mut Command) -> Result<()> {
+        // The bind mount in the child needs an existing mount point.
+        if let Some((_, dst)) = &self.bind {
+            fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
+        }
         let procs = self.cgroup_dir().join("cgroup.procs");
         apply_os(self, cmd, procs)
     }
@@ -87,6 +91,17 @@ fn apply_os(spec: &JailSpec, cmd: &mut Command, procs: PathBuf) -> Result<()> {
         )),
         None => None,
     };
+    // setgroups below drops the caller's groups; keep the groups that own
+    // the devices the VMM opens (/dev/kvm and /dev/vhost-vsock are 0660 root:kvm).
+    let mut groups: Vec<libc::gid_t> = Vec::new();
+    for dev in ["/dev/kvm", "/dev/vhost-vsock"] {
+        if let Ok(m) = fs::metadata(dev) {
+            use std::os::unix::fs::MetadataExt;
+            if m.gid() != 0 && !groups.contains(&m.gid()) {
+                groups.push(m.gid());
+            }
+        }
+    }
     let netns = match &spec.netns {
         Some(p) => Some(CString::new(p.as_os_str().as_bytes())?),
         None => None,
@@ -143,7 +158,7 @@ fn apply_os(spec: &JailSpec, cmd: &mut Command, procs: PathBuf) -> Result<()> {
                     return Err(std::io::Error::last_os_error());
                 }
             }
-            if libc::setgroups(0, std::ptr::null()) != 0 {
+            if libc::setgroups(groups.len(), groups.as_ptr()) != 0 {
                 return Err(std::io::Error::last_os_error());
             }
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
