@@ -100,6 +100,26 @@ Set `TACHYON_DATABASE_URL` (e.g. `postgres://tachyon@db:5432/tachyon`) to keep j
 
 The nightly clean run is off unless repos opt in with `-nightly-repos owner/name,...`. Each night after `-nightly-hour` (UTC, default 3; `-1` disables it) the control plane re-runs each opted-in repo's default-branch run for its newest commit without a prebuild and reports divergence as a `Tachyon nightly clean run` check on the commit. The re-run repeats every job of that workflow run, non-Tachyon and deploy jobs included, so opt in only repos where that is safe. This needs the App's Actions (write) and Checks (write) permissions.
 
+### Running the cache service
+
+```sh
+TACHYON_CACHE_KEY=... TACHYON_S3_ACCESS_KEY_ID=... TACHYON_S3_SECRET_KEY=... bin/tachyon-cache \
+  -http :8090 -public-url http://cache.r1.tachyon.internal:8090 \
+  -s3-endpoint https://s3.r1.tachyon.internal:3900 -s3-bucket tachyon-cache -s3-region garage
+```
+
+`TACHYON_CACHE_KEY` is shared with the control plane. Blobs go to any S3-compatible store (Garage, SeaweedFS, MinIO, Ceph RGW) over path-style, SigV4-signed requests; the proposed choice is in [docs/decisions/0003-object-store.md](docs/decisions/0003-object-store.md). Other flags: `-s3-prefix` (key prefix in the bucket), `-s3-part-mb` (multipart part size, default 16; memory use is about one part per concurrent upload). The secret key is never a flag: use the environment variables above, or `-s3-access-key-id-file` and `-s3-secret-key-file` (re-read only at start). The service checks the bucket at start and exits if it can't reach it. Without `-s3-endpoint`, `-dir` keeps blobs on local disk (single node) and no flag keeps them in memory; the two modes are exclusive.
+
+**Creating the bucket.** The service does not create its bucket. Once per region, an operator creates one bucket and a key pair that can read, write and delete in that bucket only. With Garage:
+
+```sh
+garage bucket create tachyon-cache
+garage key create tachyon-cache-svc          # prints the key id and secret; store them in your secret manager
+garage bucket allow --read --write tachyon-cache --key tachyon-cache-svc
+```
+
+`-s3-region` must equal the store's configured region (Garage's `s3_region`, `garage` by default in its sample config; `us-east-1` for MinIO). Add a lifecycle rule that aborts incomplete multipart uploads after a day if your store supports one: the service aborts uploads that fail, but not ones orphaned by a crash. Not yet tried against a real store; see the decision record's checklist.
+
 ### Running the package mirrors
 
 Run two `tachyon-mirror` instances per region, on separate machines:
@@ -161,7 +181,7 @@ Not built or not proven on real infrastructure:
 
 - **Base image pipeline, the parts that need real infrastructure.** The pipeline (build plan, `build.sh`, signing, SBOM, rollout, per-size snapshot builder) exists, but no image has been built on a real builder or booted under Cloud Hypervisor yet, there is no image store to push images to hosts, and the image-to-host path (copying a built image into each host's `TACHYON_IMAGES`) is manual. Builds are not yet byte-reproducible: some upstream install scripts download "latest" artifacts outside apt.
 - **Prebuild manager in production.** Triggers, planning and dispatch exist, but trigger state is in memory, and no build has run on a real host.
-- **Actions cache object store (D4).** The protocol server writes through a `BlobStore` interface; no real store backs it yet.
+- **Actions cache object store (D4).** The protocol server writes through a `BlobStore` interface. `cache.S3Store` speaks S3 and is tested against an in-process fake, but has not run against a real store, and the store choice ([0003](docs/decisions/0003-object-store.md)) is proposed, not signed off.
 - **Mirror rollout.** `tachyon-mirror` is built and tested against fake upstreams only; provisioning the instances, TLS certificates, and feeding the git mirror the list of repos Tachyon builds (a flag for now) are not done.
 - **Burst providers and abuse account data.** The burst selector has no cloud provider behind it, and the abuse gate uses an in-memory account store (every tenant gets `-unknown-tenant-plan`).
 - **Host certificate issuer** backed by the key store, and on-host renewal. Only the `tachyon hostcert` development issuer exists.
