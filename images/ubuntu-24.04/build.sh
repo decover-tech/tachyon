@@ -13,7 +13,8 @@
 # git, xz, sha256sum and e2fsprogs >= 1.47.1 (for E2FSPROGS_FAKE_TIME and
 # mkfs.ext4 -d), and tachyon-image (go build ./cmd/tachyon-image).
 #
-#   sudo images/ubuntu-24.04/build.sh /var/tmp/img
+#   CGO_ENABLED=0 go build -o /var/tmp/tachyon-guest ./cmd/tachyon-guest
+#   sudo GUEST_BIN=/var/tmp/tachyon-guest images/ubuntu-24.04/build.sh /var/tmp/img
 #   tachyon-image sign -key /secure/key.pem -o /var/tmp/img/manifest.signed.json /var/tmp/img/manifest.json
 #
 # build.sh never signs. It runs upstream install scripts as root in a
@@ -41,6 +42,7 @@ ti=${TACHYON_IMAGE:-tachyon-image}
 
 [[ $(uname -s) == Linux ]] || { echo "build.sh runs on Linux" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || { echo "build.sh must run as root (it chroots into the image)" >&2; exit 1; }
+[[ -f ${GUEST_BIN:-} ]] || { echo "GUEST_BIN must name the tachyon-guest binary to install (CGO_ENABLED=0 go build ./cmd/tachyon-guest)" >&2; exit 1; }
 
 eval "$("$ti" env -config "$here/image.yml")"
 version=${TACHYON_IMAGE_VERSION:-$("$ti" version)}
@@ -90,7 +92,6 @@ git -C "$ri" checkout -q FETCH_HEAD
 curl -fsSL --retry 3 -o "$work/base.tar.xz" "$BASE_ROOTFS_URL"
 echo "$BASE_ROOTFS_SHA256  $work/base.tar.xz" | sha256sum -c --quiet -
 
-[[ -f ${GUEST_BIN:-} ]] || die "GUEST_BIN must name the tachyon-guest binary to install (go build ./cmd/tachyon-guest)"
 
 # ---- 2. Build plan: upstream template minus image.yml's trims ---------------
 "$ti" plan -config "$here/image.yml" -runner-images "$ri" \
