@@ -27,8 +27,6 @@ skip:
     reason: ~12 GB of SDKs used by few jobs; Android repos opt in to a separate image later
   - script: Install-PowerShellAzModules.ps1
     reason: Azure PowerShell modules (several GB, Azure-hosted workflows only)
-  - script: Install-PowerShellModules.ps1
-    reason: Microsoft.Graph/Pester etc. from the PowerShell Gallery; downloads fail intermittently and few Linux jobs use them
   - script: install-haskell.sh
     reason: ghcup toolchains are large and rarely used; haskell/actions/setup installs on demand
   - script: install-julia.sh
