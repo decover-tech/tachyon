@@ -18,6 +18,8 @@ import (
 
 	"github.com/decover-tech/tachyon/internal/jobapi"
 	"github.com/decover-tech/tachyon/internal/store"
+
+	"github.com/decover-tech/tachyon/internal/telemetry"
 )
 
 const maxWebhookBytes = 5 << 20
@@ -159,6 +161,9 @@ func (a *Adapter) serveWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// perf-only: the job's control-plane steps are timed from here.
+	ctx, _ := telemetry.WithTimeline(r.Context())
+	endRead := telemetry.StartSpan(ctx, "webhook.read_verify")
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxWebhookBytes))
 	if err != nil {
 		http.Error(w, "read error", http.StatusBadRequest)
@@ -168,8 +173,9 @@ func (a *Adapter) serveWebhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad signature", http.StatusUnauthorized)
 		return
 	}
+	endRead()
 	event := r.Header.Get("X-GitHub-Event")
-	if err := a.handleEvent(r.Context(), event, body); err != nil {
+	if err := a.handleEvent(ctx, event, body); err != nil {
 		a.log().Warn("webhook failed", "event", event, "delivery", r.Header.Get("X-GitHub-Delivery"), "err", err)
 		// 5xx marks the delivery failed in the App's log. GitHub does not
 		// redeliver it on its own, so retriable failures must stay pending
@@ -525,7 +531,9 @@ func (a *Adapter) dispatch(ctx context.Context, p *pendingJob) error {
 		return fmt.Errorf("create JIT runner: %w", err)
 	}
 	p.attempts, p.runnerName = attempt, name
+	endPut := telemetry.StartSpan(ctx, "secrets.put")
 	ref, err := a.Secrets.Put(ctx, "jit/"+p.runnerName, jit.JITConfig)
+	endPut()
 	if err != nil {
 		_ = a.call(p.installationID, func() error {
 			return a.API.DeleteRunner(ctx, p.installationID, p.repo, jit.RunnerID)
@@ -544,7 +552,10 @@ func (a *Adapter) dispatch(ctx context.Context, p *pendingJob) error {
 	a.mu.Lock()
 	core := a.core
 	a.mu.Unlock()
-	if err := core.Submit(ctx, p.sub); err != nil {
+	endSubmit := telemetry.StartSpan(ctx, "core.submit")
+	err = core.Submit(ctx, p.sub)
+	endSubmit()
+	if err != nil {
 		a.cleanupRunner(ctx, p)
 		return fmt.Errorf("submit: %w", err)
 	}

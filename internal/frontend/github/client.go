@@ -21,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/decover-tech/tachyon/internal/telemetry"
 )
 
 // Client is a minimal GitHub App REST client implementing API.
@@ -73,10 +75,14 @@ func (c *Client) base() string {
 }
 
 func (c *Client) http() *http.Client {
+	hc := &http.Client{Timeout: 15 * time.Second}
 	if c.HTTP != nil {
-		return c.HTTP
+		cp := *c.HTTP
+		hc = &cp
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	// perf-only: GitHub calls made for a job are spans on its timeline.
+	hc.Transport = telemetry.TimedTransport("github", hc.Transport)
+	return hc
 }
 
 // appJWT signs a short-lived RS256 JWT identifying the App.

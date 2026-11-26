@@ -27,6 +27,7 @@ func (c *Core) saveJob(ctx context.Context, sub jobapi.Submission, state store.J
 	if c.Store == nil {
 		return nil
 	}
+	defer telemetry.StartSpan(ctx, "store.put_job", "state", string(state))()
 	j := store.Job{ID: sub.Spec.JobID, State: state, Submission: sub, UpdatedAt: c.now()}
 	if a != nil {
 		j.HostID, j.CPU, j.MemGB = a.HostID, a.CPU, a.MemGB
@@ -57,6 +58,7 @@ func (c *Core) saveRecord(ctx context.Context, rec *telemetry.Record) {
 	if c.Store == nil || rec == nil {
 		return
 	}
+	defer telemetry.StartSpan(ctx, "store.put_record")()
 	if err := c.Store.PutRecord(ctx, rec.Data()); err != nil {
 		c.log().Warn("persist record", "job", rec.JobID, "err", err)
 	}

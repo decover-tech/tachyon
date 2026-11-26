@@ -79,6 +79,7 @@ func (c *Core) observeJobFinished(r *hostlinkv1.JobResult) {
 	if c.JobRecords != nil {
 		c.JobRecords.Add(rec.Row(c.Pricing))
 	}
+	c.logBreakdown(rec)
 }
 
 // outcomeName maps OUTCOME_INFRA_ERROR to infra_error.
@@ -87,4 +88,40 @@ func outcomeName(o hostlinkv1.JobResult_Outcome) string {
 		return "unknown"
 	}
 	return strings.ToLower(strings.TrimPrefix(o.String(), "OUTCOME_"))
+}
+
+// perf-only: addHostSpans adds the host's and guest's spans from a job's
+// result to its record, and marks runner_online and job_started from the
+// guest's marks, anchored on the host clock (hostd does not send those two
+// phases as events).
+func (c *Core) addHostSpans(r *hostlinkv1.JobResult) {
+	rec := c.Record(r.GetJobId())
+	if rec == nil || len(r.GetSpans()) == 0 {
+		return
+	}
+	spans := make([]telemetry.Span, 0, len(r.GetSpans()))
+	for _, s := range r.GetSpans() {
+		spans = append(spans, telemetry.Span{
+			Component: s.GetComponent(),
+			Name:      s.GetName(),
+			Start:     s.GetStart().AsTime(),
+			Duration:  s.GetDuration().AsDuration(),
+			Depth:     int(s.GetDepth()),
+			Attrs:     s.GetAttrs(),
+		})
+		switch s.GetName() {
+		case "guest.runner_online":
+			c.markPhase(rec, telemetry.RunnerOnline, s.GetStart().AsTime())
+		case "guest.job_started":
+			c.markPhase(rec, telemetry.JobStarted, s.GetStart().AsTime())
+		}
+	}
+	rec.AddSpans(spans...)
+}
+
+// perf-only: logBreakdown writes the job's latency breakdown in one line.
+func (c *Core) logBreakdown(rec *telemetry.Record) {
+	attrs := append([]any{"job", rec.JobID, "host", rec.HostID, "outcome", rec.Outcome,
+		"prebuild_match", rec.PrebuildMatch}, rec.BreakdownLogAttrs(8)...)
+	c.log().Info("job breakdown", attrs...)
 }

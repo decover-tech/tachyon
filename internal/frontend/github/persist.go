@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/decover-tech/tachyon/internal/store"
+
+	"github.com/decover-tech/tachyon/internal/telemetry"
 )
 
 // Persistence of pending and active runners. With Adapter.Store set, a job
@@ -18,6 +20,7 @@ func (a *Adapter) savePending(ctx context.Context, p *pendingJob) error {
 	if a.Store == nil {
 		return nil
 	}
+	defer telemetry.StartSpan(ctx, "store.save_pending")()
 	return a.Store.PutPendingRunner(ctx, store.PendingRunner{
 		Frontend:       frontendName,
 		ExternalID:     p.id,

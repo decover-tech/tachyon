@@ -222,7 +222,9 @@ func (c *Core) Hint(ctx context.Context, h jobapi.Hint) error {
 // Submit plans, places and dispatches a job.
 func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 	spec := &sub.Spec
+	endPin := telemetry.StartSpan(ctx, "images.pin")
 	pinned, err := c.Images.Pin(spec.Image)
+	endPin()
 	if err != nil {
 		return fmt.Errorf("pin image %s: %w", spec.Image, err)
 	}
@@ -231,7 +233,10 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 		return err
 	}
 	if c.Limits != nil {
-		if err := c.Limits.Admit(ctx, sub); err != nil {
+		endAdmit := telemetry.StartSpan(ctx, "limits.admit")
+		err = c.Limits.Admit(ctx, sub) // the named result: the deferred Release reads it
+		endAdmit()
+		if err != nil {
 			return err
 		}
 		defer func() {
@@ -281,6 +286,9 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 	if err := c.saveJob(ctx, sub, store.JobQueued, nil); err != nil {
 		return fmt.Errorf("persist job %s: %w", spec.JobID, err)
 	}
+	// perf-only: the request's control-plane spans join the record. Deferred
+	// before saveRecord so it runs after it and includes its span.
+	defer func() { rec.AddSpans(telemetry.TimelineFrom(ctx).Spans()...) }()
 	defer c.saveRecord(ctx, rec)
 	if !resubmitted {
 		c.Metrics.JobQueued(ctx, sub.Region, spec.Hardware.VCPU)
@@ -291,7 +299,12 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 	if overdue {
 		place = c.Scheduler.PlaceOverdue
 	}
+	endPlace := telemetry.StartSpan(ctx, "scheduler.place")
 	a, err := place(sub)
+	if err == nil {
+		telemetry.Annotate(ctx, "host", a.HostID)
+	}
+	endPlace()
 	switch {
 	case errors.Is(err, scheduler.ErrDeferred),
 		// Within its bound, a deferrable job waits for owned capacity
@@ -338,7 +351,9 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 		spec.Image = ir.AssignImage(spec.JobID, spec.Image, a.HostID)
 	}
 
+	endBuild := telemetry.StartSpan(ctx, "build_assign")
 	msg, err := c.buildAssign(ctx, sub, a)
+	endBuild()
 	if err != nil {
 		c.Scheduler.Release(spec.JobID, nil)
 		if rolling {
@@ -365,7 +380,9 @@ func (c *Core) Submit(ctx context.Context, sub jobapi.Submission) (err error) {
 	// and released by the host's result.
 	c.noteJob(ctx, sub, store.JobAssigned, &a)
 	c.trackAbuse(ctx, spec, a.HostID)
+	endSend := telemetry.StartSpan(ctx, "hostlink.enqueue")
 	hc.send(&hostlinkv1.LinkResponse{Msg: &hostlinkv1.LinkResponse_Assign{Assign: msg}})
+	endSend()
 	c.offPeakStarted(sub, overdue)
 	return nil
 }
@@ -407,6 +424,7 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 	spec := sub.Spec
 	repo := shortRepo(spec.Repo)
 
+	endFork := telemetry.StartSpan(ctx, "prebuild.plan_fork")
 	snap, cfg := c.Prebuilds.Latest(repo)
 	fork := prebuild.PlanFork(spec, cfg, sub.ChangedFiles, snap)
 	snapshotID := ""
@@ -428,7 +446,12 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 		}
 	}
 
+	telemetry.Annotate(ctx, "match", string(fork.Match))
+	telemetry.Annotate(ctx, "reason", fork.Reason)
+	endFork()
+	endGet := telemetry.StartSpan(ctx, "secrets.get")
 	runnerCfg, err := c.Secrets.Get(ctx, spec.Bootstrap.JITConfig)
+	endGet()
 	if err != nil {
 		return nil, fmt.Errorf("resolve runner config: %w", err)
 	}

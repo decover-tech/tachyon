@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS tachyon.job_records
 
     webhook_received_at Nullable(DateTime64(3, 'UTC')),
     host_assigned_at    Nullable(DateTime64(3, 'UTC')),
+    host_received_at    Nullable(DateTime64(3, 'UTC')), -- perf-only
     vm_resumed_at       Nullable(DateTime64(3, 'UTC')),
     runner_online_at    Nullable(DateTime64(3, 'UTC')),
     job_started_at      Nullable(DateTime64(3, 'UTC')),
@@ -41,6 +42,10 @@ CREATE TABLE IF NOT EXISTS tachyon.job_records
     cache_misses        UInt32,
     host_load           Float64,
     cost_usd            Float64,
+
+    -- perf-only: see internal/telemetry/timeline.go
+    unattributed_seconds Nullable(Float64),
+    timeline            String CODEC(ZSTD(3)),
 
     inserted_at         DateTime64(3, 'UTC') DEFAULT now64(3)
 )

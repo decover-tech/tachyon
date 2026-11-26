@@ -252,6 +252,7 @@ var phaseMap = map[hostlinkv1.Phase]telemetry.Phase{
 	hostlinkv1.Phase_PHASE_JOB_STARTED:   telemetry.JobStarted,
 	hostlinkv1.Phase_PHASE_JOB_FINISHED:  telemetry.JobFinished,
 	hostlinkv1.Phase_PHASE_VM_DESTROYED:  telemetry.VMDestroyed,
+	hostlinkv1.Phase_PHASE_HOST_RECEIVED: telemetry.HostReceived, // perf-only
 }
 
 func (s *HostLink) onJobEvent(ev *hostlinkv1.JobEvent) {
@@ -270,6 +271,7 @@ func (s *HostLink) onJobEvent(ev *hostlinkv1.JobEvent) {
 
 func (s *HostLink) onJobResult(hc *hostConn, r *hostlinkv1.JobResult) {
 	c := s.Core
+	c.addHostSpans(r) // perf-only; before the record is closed below
 	c.prebuildResult(r)
 	var usage *scheduler.Usage
 	if r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_SUCCEEDED || r.GetOutcome() == hostlinkv1.JobResult_OUTCOME_FAILED {

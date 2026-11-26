@@ -42,6 +42,7 @@ type Record struct {
 	mu        sync.Mutex
 	phases    map[Phase]time.Time
 	steps     []Step
+	spans     []Span // perf-only: see timeline.go
 	cacheHits int
 	cacheMiss int
 
@@ -120,6 +121,7 @@ type RecordData struct {
 	Steps         []Step              `json:"steps,omitempty"`
 	CacheHits     int                 `json:"cache_hits"`
 	CacheMisses   int                 `json:"cache_misses"`
+	Spans         []Span              `json:"spans,omitempty"` // perf-only
 }
 
 // Data returns a copy of the record's contents.
@@ -134,6 +136,7 @@ func (r *Record) Data() RecordData {
 		Phases:    make(map[Phase]time.Time, len(r.phases)),
 		Steps:     append([]Step(nil), r.steps...),
 		CacheHits: r.cacheHits, CacheMisses: r.cacheMiss,
+		Spans: append([]Span(nil), r.spans...),
 	}
 	for p, t := range r.phases {
 		d.Phases[p] = t
@@ -153,6 +156,7 @@ func FromData(d RecordData) *Record {
 	}
 	r.steps = append(r.steps, d.Steps...)
 	r.cacheHits, r.cacheMiss = d.CacheHits, d.CacheMisses
+	r.spans = append(r.spans, d.Spans...)
 	return r
 }
 

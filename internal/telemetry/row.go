@@ -34,6 +34,7 @@ type JobRow struct {
 
 	WebhookReceivedAt *CHTime `json:"webhook_received_at"`
 	HostAssignedAt    *CHTime `json:"host_assigned_at"`
+	HostReceivedAt    *CHTime `json:"host_received_at"` // perf-only
 	VMResumedAt       *CHTime `json:"vm_resumed_at"`
 	RunnerOnlineAt    *CHTime `json:"runner_online_at"`
 	JobStartedAt      *CHTime `json:"job_started_at"`
@@ -52,6 +53,11 @@ type JobRow struct {
 	CacheMisses int     `json:"cache_misses"`
 	HostLoad    float64 `json:"host_load"`
 	CostUSD     float64 `json:"cost_usd"`
+
+	// perf-only: wall-clock time no span accounts for, and the job's
+	// breakdown and spans as JSON (TimelineJSON).
+	UnattributedSeconds *float64 `json:"unattributed_seconds"`
+	Timeline            string   `json:"timeline"`
 }
 
 // CHTime marshals as a ClickHouse DateTime64(3) literal in UTC, which
@@ -131,6 +137,7 @@ func (r *Record) Row(p Pricing) JobRow {
 	}
 	row.WebhookReceivedAt = at(WebhookReceived)
 	row.HostAssignedAt = at(HostAssigned)
+	row.HostReceivedAt = at(HostReceived)
 	row.VMResumedAt = at(VMResumed)
 	row.RunnerOnlineAt = at(RunnerOnline)
 	row.JobStartedAt = at(JobStarted)
@@ -149,6 +156,11 @@ func (r *Record) Row(p Pricing) JobRow {
 	row.BillableSeconds = secs(r.Billable())
 
 	row.CacheHits, row.CacheMisses = r.Cache()
+	if b := r.Breakdown(); len(b.Segments) > 0 {
+		u := b.UnattributedSeconds
+		row.UnattributedSeconds = &u
+	}
+	row.Timeline = r.timelineString()
 	r.mu.Lock()
 	for _, s := range r.steps {
 		row.StepNames = append(row.StepNames, s.Name)
