@@ -91,6 +91,9 @@ bind() {
 	mount "$@"
 	mounts+=("${@: -1}")
 }
+# Make the root a mount point, as on a real VM: upstream steps inspect it
+# with findmnt (configure-environment.sh requires ext4).
+bind --bind "$root" "$root"
 bind -t proc proc "$root/proc"
 bind -t sysfs sys "$root/sys"
 bind --bind /dev "$root/dev"
@@ -100,6 +103,14 @@ rm -f "$root/etc/resolv.conf"
 cp -L /etc/resolv.conf "$root/etc/resolv.conf"
 # No services start inside the chroot.
 printf '#!/bin/sh\nexit 101\n' >"$root/usr/sbin/policy-rc.d"
+# The guest boots its kernel directly, without a bootloader; upstream still
+# runs update-grub, so give it a no-op when the base has no grub.
+grub_stub=0
+if [[ ! -e $root/usr/sbin/update-grub ]]; then
+	printf '#!/bin/sh\nexit 0\n' >"$root/usr/sbin/update-grub"
+	chmod 755 "$root/usr/sbin/update-grub"
+	grub_stub=1
+fi
 chmod 755 "$root/usr/sbin/policy-rc.d"
 
 # Upstream's file provisioners.
@@ -148,6 +159,7 @@ fi
 for ((i = ${#mounts[@]} - 1; i >= 0; i--)); do umount -l "${mounts[i]}"; done
 mounts=()
 rm -f "$root/usr/sbin/policy-rc.d" "$root/etc/ssh/"ssh_host_*
+if [[ $grub_stub == 1 ]]; then rm -f "$root/usr/sbin/update-grub"; fi
 rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 	"$root"/tmp/* "$root"/var/tmp/* "$root"/root/.cache "$root"/home/runner/.cache
 : >"$root/etc/machine-id"
