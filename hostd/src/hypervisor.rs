@@ -116,6 +116,9 @@ pub struct GuestResult {
     /// For prebuild builds: did the secret scan pass?
     #[serde(default)]
     pub secret_scan_clean: Option<bool>,
+    /// For failed prebuild builds: the failing step and its last output.
+    #[serde(default)]
+    pub failure: String,
 }
 
 /// Control messages hostd sends the guest agent after the payload, on the

@@ -72,6 +72,9 @@ type Result struct {
 	Phases map[string]string `json:"phases"`
 	// SecretScanClean is set for prebuild builds only.
 	SecretScanClean *bool `json:"secret_scan_clean,omitempty"`
+	// Failure names a failed prebuild step and ends with its last output, so
+	// the failure is visible without the guest console.
+	Failure string `json:"failure,omitempty"`
 }
 
 // Phase names reported in Result.Phases.

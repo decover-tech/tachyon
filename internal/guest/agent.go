@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -505,7 +506,10 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		return 0, err
 	}
 	code := 0
+	var last *tailWriter
 	step := func(stepEnv []string, c string) (int, error) {
+		last = &tailWriter{max: failureTail}
+		out := io.MultiWriter(a.output(), last)
 		return a.Sys.Run(ctx, Command{
 			Path:   l.Shell,
 			Args:   []string{"-euo", "pipefail", "-c", c},
@@ -514,8 +518,8 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 			Root:   l.Root,
 			UID:    l.UID,
 			GID:    l.GID,
-			Stdout: a.output(),
-			Stderr: a.output(),
+			Stdout: out,
+			Stderr: out,
 		})
 	}
 	// The clone token is visible to the clone commands only.
@@ -535,6 +539,7 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 			}
 			if exit != 0 {
 				a.log().Error("clone step failed", "step", i+1, "exit_code", exit)
+				res.Failure = stepFailure("clone", i+1, exit, last.Bytes(), cloneToken)
 				code = exit
 				break
 			}
@@ -551,6 +556,7 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		}
 		if exit != 0 {
 			a.log().Error("warm step failed", "step", i+1, "exit_code", exit)
+			res.Failure = stepFailure("warm", i+1, exit, last.Bytes(), cloneToken)
 			code = exit
 			break
 		}
@@ -606,3 +612,29 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// failureTail bounds how much of a failed step's output Result.Failure keeps.
+const failureTail = 2048
+
+func stepFailure(kind string, n, exit int, out, token []byte) string {
+	if len(token) > 0 {
+		out = bytes.ReplaceAll(out, token, []byte("[redacted]"))
+	}
+	return fmt.Sprintf("%s step %d exited %d: %s", kind, n, exit, strings.ToValidUTF8(string(out), "?"))
+}
+
+// tailWriter keeps the last max bytes written to it.
+type tailWriter struct {
+	max int
+	buf []byte
+}
+
+func (t *tailWriter) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if over := len(t.buf) - t.max; over > 0 {
+		t.buf = append(t.buf[:0], t.buf[over:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailWriter) Bytes() []byte { return t.buf }

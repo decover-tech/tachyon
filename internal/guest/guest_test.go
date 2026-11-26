@@ -612,6 +612,38 @@ func TestPrebuildWarmStepFails(t *testing.T) {
 	}
 }
 
+func TestPrebuildFailureReportsStepOutput(t *testing.T) {
+	e := newTestEnv(t)
+	e.sys.run = func(c Command) (int, error) {
+		fmt.Fprintf(c.Stderr, "%s\nfatal: auth failed for tok-123\n", strings.Repeat("x", 3*failureTail))
+		return 128, nil
+	}
+	p := prebuildPayload()
+	p.Prebuild.CloneCommands = []string{"git fetch origin"}
+	p.Prebuild.CloneTokenB64 = base64.StdEncoding.EncodeToString([]byte("tok-123"))
+	res := e.agent.Run(context.Background(), p)
+	if !strings.HasPrefix(res.Failure, "clone step 1 exited 128: ") {
+		t.Fatalf("failure %q", res.Failure)
+	}
+	if !strings.HasSuffix(res.Failure, "fatal: auth failed for [redacted]\n") || strings.Contains(res.Failure, "tok-123") {
+		t.Errorf("failure tail %q", res.Failure[len(res.Failure)-60:])
+	}
+	if len(res.Failure) > failureTail+64 {
+		t.Errorf("failure is %d bytes", len(res.Failure))
+	}
+}
+
+func TestPrebuildSuccessHasNoFailure(t *testing.T) {
+	e := newTestEnv(t)
+	e.sys.run = func(c Command) (int, error) {
+		fmt.Fprintln(c.Stdout, "installed")
+		return 0, nil
+	}
+	if res := e.agent.Run(context.Background(), prebuildPayload()); res.Failure != "" {
+		t.Errorf("failure %q", res.Failure)
+	}
+}
+
 func TestPrebuildSecretScanFails(t *testing.T) {
 	for name, body := range map[string]string{
 		"token":         "token=ghp_" + strings.Repeat("a", 36),
