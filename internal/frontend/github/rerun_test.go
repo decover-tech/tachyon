@@ -324,7 +324,20 @@ func TestAdapterRedispatchesJobWhoseRunnerWasTaken(t *testing.T) {
 	if len(h.api.deleted) != 0 {
 		t.Fatalf("deleted %v: the taken runner is running job 1", h.api.deleted)
 	}
-	if _, ok := h.a.jobs["gh_2-2"]; !ok {
+	if ref := h.a.jobs["gh_2-2"]; ref == nil || ref.githubJobID != 2 {
 		t.Fatal("retry ID not mapped back to the GitHub job")
+	}
+}
+
+func TestAdapterRobbedRetryMappedAfterRobbedVMResult(t *testing.T) {
+	h := newHarness(t)
+	h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret)
+	h.post("workflow_job", jobEvent("queued", 2, tachyonLabels, ""), testSecret)
+	h.post("workflow_job", jobEvent("in_progress", 1, tachyonLabels, h.api.created[1]), testSecret)
+	// Job 2's VM ran job 1 and finished before job 2 was re-dispatched.
+	h.a.OnResult(context.Background(), jobapi.Result{JobID: "gh_2", Outcome: jobapi.OutcomeSucceeded})
+	h.a.Reconcile(context.Background())
+	if ref := h.a.jobs["gh_2-2"]; ref == nil || ref.githubJobID != 2 || ref.repo == "" {
+		t.Fatalf("retry ID mapping = %+v", ref)
 	}
 }

@@ -87,6 +87,7 @@ type pendingJob struct {
 	secretRef      string
 	submittedAt    time.Time
 	attempts       int
+	robbed         bool // another job took its runner
 }
 
 var (
@@ -318,7 +319,7 @@ func (a *Adapter) onWorkflowJob(ctx context.Context, e workflowJobEvent) error {
 		// re-dispatch it on the next reconcile, and leave the runner alone.
 		for _, y := range a.pending {
 			if y.runnerName == j.RunnerName && y.dispatched && !y.busy {
-				y.runnerID, y.submittedAt = 0, time.Time{}
+				y.runnerID, y.submittedAt, y.robbed = 0, time.Time{}, true
 			}
 		}
 		a.mu.Unlock()
@@ -490,15 +491,26 @@ func (a *Adapter) dispatch(ctx context.Context, p *pendingJob) error {
 	attempt := p.attempts + 1
 	base := specJobID(p.id)
 	name := fmt.Sprintf("tachyon-%s-%d", base, attempt)
-	if attempt > 1 {
-		// A new ID per retry: the core ignores a job ID it has placed, and
-		// the earlier attempt's VM may still be running (its runner taken
-		// by another job).
+	if p.robbed {
+		// The core ignores a job ID it has placed, and the robbed VM is
+		// still running the other job, so the retry needs a new ID. Its
+		// result maps back to this GitHub job even if the robbed VM's
+		// result already removed the original mapping.
+		p.robbed = false
 		p.sub.Spec.JobID = fmt.Sprintf("%s-%d", base, attempt)
 		a.mu.Lock()
-		if ref := a.jobs[base]; ref != nil {
-			a.jobs[p.sub.Spec.JobID] = ref
+		a.initLocked()
+		ref := a.jobs[base]
+		if ref == nil {
+			ref = &jobRef{
+				installationID: p.installationID,
+				repo:           p.repo,
+				githubJobID:    p.id,
+				runAttempt:     p.event.WorkflowJob.RunAttempt,
+			}
 		}
+		ref.seen = a.now()
+		a.jobs[p.sub.Spec.JobID] = ref
 		a.mu.Unlock()
 	}
 	var jit JITRunner
