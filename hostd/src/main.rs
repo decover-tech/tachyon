@@ -100,7 +100,9 @@ async fn main() -> Result<()> {
         config: network::NetConfig {
             egress_mbit: env_or("TACHYON_EGRESS_MBIT", "1000").parse()?,
             mirrors: network::parse_list(&env_or("TACHYON_MIRRORS", ""))?,
-            dns: parse_ips(&env_or("TACHYON_DNS", ""))?,
+            // The base image's resolv.conf names these; without them a
+            // prebuild build (restricted egress) cannot resolve anything.
+            dns: parse_ips(&env_or("TACHYON_DNS", "1.1.1.1,8.8.8.8"))?,
         },
         rules_dir: run_dir.join("net"),
         runner: Box::new(storage::ExecRunner),
