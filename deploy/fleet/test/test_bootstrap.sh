@@ -68,6 +68,10 @@ check "packages step" "$out" "+ env DEBIAN_FRONTEND=noninteractive apt-get insta
 check "existing pool is left alone" "$out" "zpool tank exists; not touching its devices"
 refute "no zpool create on existing pool" "$out" "zpool create"
 check "dataset created" "$out" "+ zfs create -p -o mountpoint=none tank/tachyon"
+refute "no image dataset without IMAGES" "$out" "tank/tachyon/images"
+conf "$TMP/img.conf" "IMAGES=/var/lib/tachyon/base"
+img_out=$(FLEET_TEST_POOL_EXISTS=1 "$BOOT" -c "$TMP/img.conf" -n -r "$TMP/rimg" zfs 2>&1)
+check "image store on its own dataset" "$img_out" "+ zfs create -p -o mountpoint=/var/lib/tachyon/base tank/tachyon/images"
 check "ch-remote verified install" "$out" "fetch $TMP/chr -> $R1/usr/local/bin/ch-remote (sha256 $(sha "$TMP/chr"))"
 
 env_file="$R1/etc/tachyon/hostd.env"

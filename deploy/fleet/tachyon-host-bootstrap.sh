@@ -227,6 +227,11 @@ step_zfs() {
   if [ "$pool" != "$ZFS_POOL" ]; then
     run zfs create -p -o mountpoint=none "$ZFS_POOL" || say "dataset $ZFS_POOL exists"
   fi
+  if [ -n "$IMAGES" ]; then
+    # Base snapshots hold full guest memory (4 GiB per vCPU, about 120 GB
+    # for sizes 2-16 per image version): too big for the root volume.
+    run zfs create -p -o mountpoint="$IMAGES" "$ZFS_POOL/images" || say "dataset $ZFS_POOL/images exists"
+  fi
   write_file /etc/modprobe.d/zfs-tachyon.conf 0644 <<E
 # Managed by tachyon-host-bootstrap.sh. Caps the ARC so VM memory is not
 # starved; starting value, not measured. Applies at next module load.
