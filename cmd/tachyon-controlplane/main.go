@@ -28,6 +28,7 @@ import (
 
 	hostlinkv1 "github.com/decover-tech/tachyon/gen/hostlink/v1"
 	"github.com/decover-tech/tachyon/internal/abuse"
+	"github.com/decover-tech/tachyon/internal/billing"
 	"github.com/decover-tech/tachyon/internal/cache"
 	"github.com/decover-tech/tachyon/internal/controlplane"
 	"github.com/decover-tech/tachyon/internal/frontend/github"
@@ -89,6 +90,10 @@ func main() {
 	unknownPlan := flag.String("unknown-tenant-plan", "paid", "plan assumed for tenants with no account record (free, trial, paid; empty refuses them)")
 	adminAddr := flag.String("admin-addr", "", "operator API listen address (host drain/undrain, host list); needs -admin-token-file; off when empty. Bind it to a private interface or 127.0.0.1")
 	adminTokenFile := flag.String("admin-token-file", "", "file holding the operator API bearer token (at least 32 bytes); never logged")
+	runnerPrices := flag.String("bill-runner-per-minute", "", "runner prices in USD per minute by VM vCPUs, e.g. 2=0.004,4=0.008,8=0.016; turns on metering and GET /admin/billing/invoices (empty: off)")
+	prebuildAllowance := flag.Duration("bill-prebuild-allowance", 0, "prebuild runner time included per repo per month")
+	storageQuotaGB := flag.Float64("bill-storage-quota-gb", 0, "storage included per repo, in GB")
+	storagePrice := flag.Float64("bill-storage-gb-month", 0, "price in USD of one GB-month stored above quota")
 	flag.Parse()
 
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
@@ -227,6 +232,19 @@ func main() {
 		JobRecords: jobRecords,
 		Pricing:    telemetry.Pricing{OwnedVCPUHour: *priceOwned, BurstVCPUHour: *priceBurst},
 	}
+	if *runnerPrices != "" {
+		prices, err := parseRunnerPrices(*runnerPrices)
+		if err != nil {
+			log.Error("-bill-runner-per-minute", "err", err)
+			os.Exit(2)
+		}
+		core.Meter = billing.NewMeter(billing.PriceBook{
+			RunnerPerMinute:   prices,
+			PrebuildAllowance: *prebuildAllowance,
+			StorageQuotaBytes: int64(*storageQuotaGB * billing.GB),
+			StoragePerGBMonth: usd(*storagePrice),
+		})
+	}
 	if err := core.RegisterMetrics(); err != nil {
 		log.Error("metrics", "err", err)
 		os.Exit(1)
@@ -328,6 +346,15 @@ func main() {
 			os.Exit(1)
 		}
 		log.Info("state restored", "hosts", st.Hosts, "running", st.Running, "requeued", st.Requeued, "pending_runners", pending)
+		// Last month too, so its invoice is still served after a restart.
+		n, err := core.ReplayMeter(ctx, previousMonth(time.Now()))
+		if err != nil {
+			log.Error("replay billing", "err", err)
+			os.Exit(1)
+		}
+		if core.Meter != nil {
+			log.Info("billing replayed", "jobs", n)
+		}
 	}
 
 	mux := http.NewServeMux()
