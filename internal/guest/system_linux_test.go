@@ -3,8 +3,13 @@
 package guest
 
 import (
+	"bytes"
+	"context"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseMountinfo(t *testing.T) {
@@ -34,5 +39,30 @@ func TestUnderDir(t *testing.T) {
 		if got := underDir(p, "/run/tachyon/root"); got != want {
 			t.Errorf("underDir(%q) = %v", p, got)
 		}
+	}
+}
+
+func TestRunReturnsWhileBackgroundProcessHoldsOutput(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to chroot and set credentials")
+	}
+	var out bytes.Buffer
+	start := time.Now()
+	code, err := (&LinuxSystem{}).Run(context.Background(), Command{
+		Path:   "/bin/sh",
+		Args:   []string{"-c", "sleep 30 & echo started"},
+		Root:   "/",
+		Dir:    "/",
+		Stdout: &out,
+		Stderr: &out,
+	})
+	if err != nil || code != 0 {
+		t.Fatalf("Run = %d, %v", code, err)
+	}
+	if d := time.Since(start); d > 10*time.Second {
+		t.Errorf("Run waited %s for the background process", d)
+	}
+	if !strings.Contains(out.String(), "started") {
+		t.Errorf("output %q", out.String())
 	}
 }

@@ -109,16 +109,26 @@ func (s *LinuxSystem) Run(ctx context.Context, c Command) (int, error) {
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGKILL,
 	}
+	// A writer that isn't an *os.File is fed through a pipe, and Wait waits
+	// for every holder of it, including daemons a step left running. Stop
+	// waiting soon after the process exits; Quiesce stops the daemons.
+	cmd.WaitDelay = outputWaitDelay
 	err := cmd.Run()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		return ee.ExitCode(), nil
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return 0, nil
 	}
 	if err != nil {
 		return 0, err
 	}
 	return 0, nil
 }
+
+// outputWaitDelay bounds how long Run reads output after the process exits.
+const outputWaitDelay = 2 * time.Second
 
 func orDiscard(w io.Writer) io.Writer {
 	if w == nil {
