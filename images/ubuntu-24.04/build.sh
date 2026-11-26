@@ -56,8 +56,21 @@ work=$(mktemp -d /var/tmp/tachyon-image.XXXXXX)
 root=$work/root
 mounts=()
 
+# stop_dockerd stops the dockerd that the systemctl shim (below) started.
+stop_dockerd() {
+	local pid _
+	pid=$(cat "$root/run/docker.pid" 2>/dev/null) || return 0
+	kill "$pid" 2>/dev/null || return 0
+	for _ in $(seq 30); do
+		kill -0 "$pid" 2>/dev/null || return 0
+		sleep 1
+	done
+	kill -9 "$pid" 2>/dev/null || true
+}
+
 cleanup() {
 	local i
+	stop_dockerd
 	for ((i = ${#mounts[@]} - 1; i >= 0; i--)); do
 		umount -l "${mounts[i]}" 2>/dev/null || true
 	done
@@ -112,6 +125,38 @@ if [[ ! -e $root/usr/sbin/update-grub ]]; then
 	grub_stub=1
 fi
 chmod 755 "$root/usr/sbin/policy-rc.d"
+# install-docker.sh starts Docker, then pulls images into it and tests the
+# server. A systemctl shim, earlier on PATH than the real one, runs dockerd
+# directly for docker.service; other calls go to the real systemctl. dockerd
+# shares the host's network namespace, so it creates no bridge or iptables
+# rules. Removed, with dockerd stopped, before the image is sealed.
+bind --bind /sys/fs/cgroup "$root/sys/fs/cgroup"
+cat >"$root/usr/local/sbin/systemctl" <<'SH'
+#!/bin/bash
+# Image build shim; see build.sh. Not in the finished image.
+if [[ "$*" == *docker.service* || "$*" == *" docker" ]]; then
+	running() { docker version >/dev/null 2>&1; }
+	case $1 in
+	is-active)
+		running && exit 0
+		exit 3
+		;;
+	start | restart)
+		running && exit 0
+		setsid dockerd --pidfile /run/docker.pid --bridge=none --iptables=false --ip6tables=false \
+			>>/var/log/dockerd-build.log 2>&1 </dev/null &
+		for _ in $(seq 60); do
+			running && exit 0
+			sleep 1
+		done
+		echo "dockerd did not start; see /var/log/dockerd-build.log" >&2
+		exit 1
+		;;
+	esac
+fi
+exec /usr/bin/systemctl "$@"
+SH
+chmod 755 "$root/usr/local/sbin/systemctl"
 
 # Upstream's file provisioners.
 ig=$root/imagegeneration
@@ -181,9 +226,10 @@ if [[ -d $root/opt/hostedtoolcache ]]; then
 fi
 
 # ---- 5. Normalize for reproducibility ---------------------------------------
+stop_dockerd
 for ((i = ${#mounts[@]} - 1; i >= 0; i--)); do umount -l "${mounts[i]}"; done
 mounts=()
-rm -f "$root/usr/sbin/policy-rc.d" "$root/etc/ssh/"ssh_host_*
+rm -f "$root/usr/sbin/policy-rc.d" "$root/usr/local/sbin/systemctl" "$root/run/docker.pid" "$root/etc/ssh/"ssh_host_*
 if [[ $grub_stub == 1 ]]; then rm -f "$root/usr/sbin/update-grub"; fi
 rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 	"$root"/tmp/* "$root"/var/tmp/* "$root"/root/.cache "$root"/home/runner/.cache
