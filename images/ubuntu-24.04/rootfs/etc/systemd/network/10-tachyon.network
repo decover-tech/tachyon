@@ -1,6 +1,9 @@
 # Same in every VM (see hostd/src/network.rs): one base snapshot serves every slot.
+# Match the virtio NIC only: Type=ether also matches the kernel's dummy0 and
+# Docker's veths, and a second 172.16.0.2/30 with its own default route
+# black-holes the job's traffic.
 [Match]
-Type=ether
+Driver=virtio_net
 
 [Network]
 Address=172.16.0.2/30
