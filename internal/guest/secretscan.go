@@ -37,11 +37,12 @@ var secretRules = []secretRule{
 
 // registryDirs hold packages downloaded from public registries, whose docs
 // and test fixtures are full of sample keys (dotenv's README, selfsigned,
-// the AWS SDK's AKIA...EXAMPLE). Only the literal secrets the guest actually
+// the AWS SDK's AKIA...EXAMPLE), as is Node's code cache of them. Only the literal secrets the guest actually
 // handed the build (clone token, runner config) are looked for in them.
 var registryDirs = []string{
 	"/node_modules/", "/site-packages/", "/dist-packages/",
 	"/.npm/_cacache/", "/.cache/pip/", "/.cargo/registry/",
+	"/node-compile-cache/",
 }
 
 func fromRegistry(rel string) bool {
