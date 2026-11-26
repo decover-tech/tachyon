@@ -139,6 +139,10 @@ chmod -R a+rx "$ig/installers"
 # The runner user GitHub's image has; upstream's non-sudo steps run as it.
 chroot "$root" id runner >/dev/null 2>&1 || chroot "$root" useradd -m -u 1001 -s /bin/bash runner
 
+# Packer runs each upstream step in a new login session, which loads
+# /etc/environment (AGENT_TOOLSDIRECTORY, the PATH earlier steps extended).
+# shellcheck disable=SC2016 # expanded inside the chroot
+load_env='set -a; if [[ -r /etc/environment ]]; then . /etc/environment; fi; set +a;'
 # run_step <root|user> <sh|pwsh> <script> [KEY=VALUE...], called by plan.sh.
 run_step() {
 	local who=$1 shell=$2 script=$3
@@ -151,7 +155,7 @@ run_step() {
 	chroot "${spec[@]}" "$root" /usr/bin/env -i \
 		PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 		HOME="$([[ $who == user ]] && echo /home/runner || echo /root)" \
-		LANG=C.UTF-8 "$@" "${cmd[@]}"
+		LANG=C.UTF-8 "$@" /bin/bash -c "$load_env"' exec "$@"' step "${cmd[@]}"
 }
 # shellcheck source=/dev/null
 source "$work/plan.sh"
