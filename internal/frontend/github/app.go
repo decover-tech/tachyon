@@ -30,6 +30,7 @@ import (
 const (
 	PermActions        = "actions"
 	PermAdministration = "administration"
+	PermChecks         = "checks"
 	PermContents       = "contents"
 	PermMetadata       = "metadata"
 
@@ -59,6 +60,81 @@ var AppEvents = map[string]string{
 	"push":         PermContents,
 }
 
+// Feature is an opt-in capability that needs permissions beyond the base
+// set. A deployment that does not enable a feature neither registers nor
+// requests those permissions, and the client refuses to make the feature's
+// calls.
+type Feature string
+
+const (
+	// FeatureInfraRerun re-runs jobs that failed for infrastructure reasons
+	// (Adapter.RerunInfra, -github-rerun-infra).
+	FeatureInfraRerun Feature = "infra-rerun"
+	// FeatureNightly runs one clean run per repo per night and reports the
+	// result as a check run (Adapter.Nightly, -nightly-repos).
+	FeatureNightly Feature = "nightly"
+)
+
+// FeaturePermissions are the extra repository permissions each feature
+// needs on top of AppPermissions.
+var FeaturePermissions = map[Feature]map[string]string{
+	FeatureInfraRerun: {PermActions: AccessWrite},
+	FeatureNightly:    {PermActions: AccessWrite, PermChecks: AccessWrite},
+}
+
+// FeatureEndpoints are the calls Client makes only for an enabled feature.
+var FeatureEndpoints = map[Feature][]Endpoint{
+	FeatureInfraRerun: {
+		{"POST", "/repos/{owner}/{repo}/actions/jobs/{job_id}/rerun", PermActions, AccessWrite},
+	},
+	FeatureNightly: {
+		{"POST", "/repos/{owner}/{repo}/actions/runs/{run_id}/rerun", PermActions, AccessWrite},
+		{"POST", "/repos/{owner}/{repo}/check-runs", PermChecks, AccessWrite},
+	},
+}
+
+// ParseFeatures turns names (as given to `tachyon github-app manifest
+// -features`) into Features, rejecting unknown ones.
+func ParseFeatures(names []string) ([]Feature, error) {
+	var out []Feature
+	for _, n := range names {
+		f := Feature(strings.TrimSpace(n))
+		if f == "" {
+			continue
+		}
+		if _, ok := FeaturePermissions[f]; !ok {
+			return nil, fmt.Errorf("github: unknown feature %q (known: %s)", n, strings.Join(featureNames(), ", "))
+		}
+		if !slices.Contains(out, f) {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+func featureNames() []string {
+	names := make([]string, 0, len(FeaturePermissions))
+	for f := range FeaturePermissions {
+		names = append(names, string(f))
+	}
+	slices.Sort(names)
+	return names
+}
+
+// PermissionsFor is AppPermissions plus what the given features need. With
+// no features it equals AppPermissions.
+func PermissionsFor(features ...Feature) map[string]string {
+	out := maps.Clone(AppPermissions)
+	for _, f := range features {
+		for perm, access := range FeaturePermissions[f] {
+			if out[perm] != AccessWrite {
+				out[perm] = access
+			}
+		}
+	}
+	return out
+}
+
 // Endpoint is one GitHub REST call the client makes and the installation
 // permission it needs. Permission "" means the call is authenticated as the
 // App itself (JWT), not as an installation.
@@ -80,13 +156,32 @@ var Endpoints = []Endpoint{
 	{"DELETE", "/repos/{owner}/{repo}/actions/runners/{runner_id}", PermAdministration, AccessWrite},
 }
 
-// LookupEndpoint finds the Endpoint for a request. path is the escaped URL
-// path (a branch name like release/1 arrives as release%2F1); any query is
-// ignored.
+// LookupEndpoint finds the Endpoint for a request, among the base Endpoints
+// and every feature's. path is the escaped URL path (a branch name like
+// release/1 arrives as release%2F1); any query is ignored.
 func LookupEndpoint(method, path string) (Endpoint, bool) {
+	e, _, ok := lookupEndpoint(method, path)
+	return e, ok
+}
+
+// lookupEndpoint also reports which feature the endpoint belongs to ("" for
+// the base set).
+func lookupEndpoint(method, path string) (Endpoint, Feature, bool) {
 	path, _, _ = strings.Cut(path, "?")
+	if e, ok := matchEndpoint(Endpoints, method, path); ok {
+		return e, "", true
+	}
+	for _, f := range slices.Sorted(maps.Keys(FeatureEndpoints)) {
+		if e, ok := matchEndpoint(FeatureEndpoints[f], method, path); ok {
+			return e, f, true
+		}
+	}
+	return Endpoint{}, "", false
+}
+
+func matchEndpoint(list []Endpoint, method, path string) (Endpoint, bool) {
 	got := strings.Split(path, "/")
-	for _, e := range Endpoints {
+	for _, e := range list {
 		if e.Method != method {
 			continue
 		}
@@ -117,7 +212,11 @@ func LookupEndpoint(method, path string) (Endpoint, bool) {
 
 // NeededPermissions is the least set of permissions that covers Endpoints,
 // AppEvents and the mandatory metadata permission.
-func NeededPermissions() map[string]string {
+func NeededPermissions() map[string]string { return NeededPermissionsFor() }
+
+// NeededPermissionsFor is NeededPermissions plus what the given features'
+// endpoints need.
+func NeededPermissionsFor(features ...Feature) map[string]string {
 	need := map[string]string{PermMetadata: AccessRead}
 	add := func(perm, access string) {
 		if perm == "" {
@@ -129,6 +228,11 @@ func NeededPermissions() map[string]string {
 	}
 	for _, e := range Endpoints {
 		add(e.Permission, e.Access)
+	}
+	for _, f := range features {
+		for _, e := range FeatureEndpoints[f] {
+			add(e.Permission, e.Access)
+		}
 	}
 	for _, perm := range AppEvents {
 		add(perm, AccessRead)
@@ -143,10 +247,16 @@ func NeededPermissions() map[string]string {
 // Fewer permissions are not an error here; GitHub rejects the token request
 // when an installation has not accepted a permission the App asks for.
 func CheckGranted(granted map[string]string) error {
+	return CheckGrantedWithin(granted, AppPermissions)
+}
+
+// CheckGrantedWithin is CheckGranted against an explicit set, such as
+// PermissionsFor(features...).
+func CheckGrantedWithin(granted, allowed map[string]string) error {
 	var extra []string
 	for _, perm := range slices.Sorted(maps.Keys(granted)) {
 		access := granted[perm]
-		want, ok := AppPermissions[perm]
+		want, ok := allowed[perm]
 		if !ok || (access == AccessWrite && want != AccessWrite) {
 			extra = append(extra, perm+":"+access)
 		}
@@ -183,10 +293,12 @@ type ManifestOptions struct {
 	WebhookURL  string // the control plane's POST /webhooks/github
 	RedirectURL string // where GitHub sends the manifest code; optional
 	Public      bool   // false: installable only by the owning account
+	// Features adds the permissions of opt-in features to the manifest.
+	Features []Feature
 }
 
-// NewManifest builds the App manifest with exactly AppPermissions and
-// AppEvents.
+// NewManifest builds the App manifest with exactly AppPermissions (plus
+// the permissions of any opted-in Features) and AppEvents.
 func NewManifest(o ManifestOptions) (Manifest, error) {
 	if o.Name == "" {
 		return Manifest{}, errors.New("github app manifest: name is required")
@@ -203,6 +315,11 @@ func NewManifest(o ManifestOptions) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("github app manifest: webhook URL %q must be https", raw)
 		}
 	}
+	for _, f := range o.Features {
+		if _, ok := FeaturePermissions[f]; !ok {
+			return Manifest{}, fmt.Errorf("github app manifest: unknown feature %q (known: %s)", f, strings.Join(featureNames(), ", "))
+		}
+	}
 	return Manifest{
 		Name:               o.Name,
 		URL:                o.Homepage,
@@ -210,7 +327,7 @@ func NewManifest(o ManifestOptions) (Manifest, error) {
 		HookAttributes:     HookAttributes{URL: o.WebhookURL, Active: true},
 		RedirectURL:        o.RedirectURL,
 		Public:             o.Public,
-		DefaultPermissions: maps.Clone(AppPermissions),
+		DefaultPermissions: PermissionsFor(o.Features...),
 		DefaultEvents:      slices.Sorted(maps.Keys(AppEvents)),
 	}, nil
 }

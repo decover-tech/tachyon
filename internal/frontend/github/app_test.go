@@ -3,11 +3,13 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -213,5 +215,163 @@ func TestNewManifestValidates(t *testing.T) {
 	}
 	if _, err := NewManifest(ok); err != nil {
 		t.Errorf("valid options: %v", err)
+	}
+}
+
+func TestFeaturePermissionsAreExactlyWhatEndpointsNeed(t *testing.T) {
+	if got := PermissionsFor(); !maps.Equal(got, AppPermissions) {
+		t.Errorf("no features: %v, want the base set", got)
+	}
+	// Each feature adds exactly the permissions its endpoints need, nothing
+	// more, and never touches the base set when disabled.
+	for f := range FeaturePermissions {
+		got, need := PermissionsFor(f), NeededPermissionsFor(f)
+		if !maps.Equal(got, need) {
+			t.Errorf("feature %s: requested %v, needed %v", f, got, need)
+		}
+		if _, ok := FeatureEndpoints[f]; !ok {
+			t.Errorf("feature %s has permissions but no endpoints", f)
+		}
+	}
+	if got := PermissionsFor(FeatureInfraRerun); got[PermActions] != AccessWrite || got[PermChecks] != "" {
+		t.Errorf("infra-rerun = %v, want actions:write and no checks", got)
+	}
+	if got := PermissionsFor(FeatureNightly); got[PermActions] != AccessWrite || got[PermChecks] != AccessWrite {
+		t.Errorf("nightly = %v, want actions:write and checks:write", got)
+	}
+	// Both together do not duplicate or widen beyond the union.
+	if got := PermissionsFor(FeatureInfraRerun, FeatureNightly); !maps.Equal(got, PermissionsFor(FeatureNightly)) {
+		t.Errorf("both = %v", got)
+	}
+	// The package-level base set is untouched by building feature sets.
+	if !maps.Equal(AppPermissions, map[string]string{"actions": "read", "administration": "write", "contents": "read", "metadata": "read"}) {
+		t.Errorf("AppPermissions was modified: %v", AppPermissions)
+	}
+}
+
+func TestFeatureEndpointsAreNotInTheBaseSet(t *testing.T) {
+	for f, list := range FeatureEndpoints {
+		for _, e := range list {
+			if _, ok := matchEndpoint(Endpoints, e.Method, e.Path); ok {
+				t.Errorf("feature %s endpoint %s %s is also in the base Endpoints", f, e.Method, e.Path)
+			}
+			if !covers(PermissionsFor(f)[e.Permission], e.Access) {
+				t.Errorf("feature %s endpoint %s %s needs %s:%s which the feature does not grant", f, e.Method, e.Path, e.Permission, e.Access)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		method, path string
+		feature      Feature
+	}{
+		{"POST", "/repos/acme/api/actions/jobs/9/rerun", FeatureInfraRerun},
+		{"POST", "/repos/acme/api/actions/runs/9/rerun", FeatureNightly},
+		{"POST", "/repos/acme/api/check-runs", FeatureNightly},
+		{"GET", "/repos/acme/api/actions/runs/9", ""},
+	} {
+		_, f, ok := lookupEndpoint(tc.method, tc.path)
+		if !ok || f != tc.feature {
+			t.Errorf("%s %s: feature %q ok=%v, want %q", tc.method, tc.path, f, ok, tc.feature)
+		}
+	}
+}
+
+func TestParseFeatures(t *testing.T) {
+	got, err := ParseFeatures([]string{"nightly", " infra-rerun", "", "nightly"})
+	if err != nil || len(got) != 2 || got[0] != FeatureNightly || got[1] != FeatureInfraRerun {
+		t.Errorf("ParseFeatures = %v, %v", got, err)
+	}
+	if got, err := ParseFeatures(strings.Split("", ",")); err != nil || len(got) != 0 {
+		t.Errorf("empty = %v, %v", got, err)
+	}
+	if _, err := ParseFeatures([]string{"bogus"}); err == nil || !strings.Contains(err.Error(), "bogus") {
+		t.Errorf("unknown feature: %v", err)
+	}
+}
+
+func TestNewManifestWithFeatures(t *testing.T) {
+	o := ManifestOptions{Name: "Tachyon", Homepage: "https://tachyon.example", WebhookURL: "https://cp.tachyon.example/webhooks/github"}
+	base, err := NewManifest(o)
+	if err != nil || !maps.Equal(base.DefaultPermissions, AppPermissions) {
+		t.Fatalf("base manifest = %v, %v", base.DefaultPermissions, err)
+	}
+	o.Features = []Feature{FeatureNightly}
+	m, err := NewManifest(o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := PermissionsFor(FeatureNightly); !maps.Equal(m.DefaultPermissions, want) {
+		t.Errorf("manifest permissions = %v, want %v", m.DefaultPermissions, want)
+	}
+	o.Features = []Feature{"bogus"}
+	if _, err := NewManifest(o); err == nil {
+		t.Error("unknown feature accepted")
+	}
+}
+
+func TestClientRefusesDisabledFeatureWithoutAnyRequest(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+	defer srv.Close()
+	c := &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL}
+	ctx := context.Background()
+	if err := c.RerunJob(ctx, 1, "acme/api", 5); !errors.Is(err, ErrFeatureDisabled) {
+		t.Errorf("RerunJob: %v", err)
+	}
+	if err := c.RerunWorkflow(ctx, 1, "acme/api", 5); !errors.Is(err, ErrFeatureDisabled) {
+		t.Errorf("RerunWorkflow: %v", err)
+	}
+	if err := c.CreateCheckRun(ctx, 1, "acme/api", CheckRun{}); !errors.Is(err, ErrFeatureDisabled) {
+		t.Errorf("CreateCheckRun: %v", err)
+	}
+	// Enabling one feature does not enable the other's calls.
+	c.Features = []Feature{FeatureInfraRerun}
+	if err := c.RerunWorkflow(ctx, 1, "acme/api", 5); !errors.Is(err, ErrFeatureDisabled) {
+		t.Errorf("RerunWorkflow with only infra-rerun: %v", err)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("%d requests reached GitHub for disabled features", n)
+	}
+}
+
+func TestFeatureTokensAreScopedAndChecked(t *testing.T) {
+	var asked, granted map[string]string
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /app/installations/1/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Permissions map[string]string `json:"permissions"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		asked = body.Permissions
+		json.NewEncoder(w).Encode(map[string]any{"token": "t", "expires_at": time.Now().Add(time.Hour), "permissions": granted})
+	})
+	mux.HandleFunc("GET /repos/acme/api/actions/runners", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"runners":[]}`)) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Default client: base set requested; actions:write is overbroad.
+	c := &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL}
+	granted = map[string]string{"actions": "write", "administration": "write", "contents": "read", "metadata": "read"}
+	if _, err := c.ListRunners(context.Background(), 1, "acme/api"); err == nil || !strings.Contains(err.Error(), "actions:write") {
+		t.Errorf("base client accepted actions:write: %v", err)
+	}
+	if !maps.Equal(asked, AppPermissions) {
+		t.Errorf("base client asked for %v", asked)
+	}
+
+	// Nightly client: its extra permissions are requested and accepted.
+	c = &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL, Features: []Feature{FeatureNightly}}
+	granted = PermissionsFor(FeatureNightly)
+	if _, err := c.ListRunners(context.Background(), 1, "acme/api"); err != nil {
+		t.Errorf("nightly client rejected its own permissions: %v", err)
+	}
+	if !maps.Equal(asked, PermissionsFor(FeatureNightly)) {
+		t.Errorf("nightly client asked for %v", asked)
+	}
+	// ...but nothing beyond them is.
+	c = &Client{AppID: 1, PrivateKey: testKey(t), BaseURL: srv.URL, Features: []Feature{FeatureNightly}}
+	granted = map[string]string{"actions": "write", "checks": "write", "contents": "write", "administration": "write", "metadata": "read"}
+	if _, err := c.ListRunners(context.Background(), 1, "acme/api"); err == nil || !strings.Contains(err.Error(), "contents:write") {
+		t.Errorf("nightly client accepted contents:write: %v", err)
 	}
 }

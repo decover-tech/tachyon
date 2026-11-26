@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/decover-tech/tachyon/internal/frontend/github"
 	"github.com/decover-tech/tachyon/internal/prebuild"
@@ -23,7 +24,7 @@ func usage() {
   tachyon hostcert ca -out <prefix> [-ttl 8760h]
   tachyon hostcert host -ca <prefix> -id <host_id> -out <prefix> [-ttl 720h] [-trust-domain tachyon]
   tachyon hostcert server -ca <prefix> -name <dns-or-ip>[,...] -out <prefix> [-ttl 2160h]
-  tachyon github-app manifest -webhook-url <url> [-name Tachyon] [-homepage <url>] [-redirect-url <url>] [-public]`)
+  tachyon github-app manifest -webhook-url <url> [-name Tachyon] [-homepage <url>] [-redirect-url <url>] [-public] [-features infra-rerun,nightly]`)
 	os.Exit(2)
 }
 
@@ -89,7 +90,14 @@ func appManifest(args []string) {
 	fs.StringVar(&o.WebhookURL, "webhook-url", "", "control plane webhook URL, ending in /webhooks/github (https)")
 	fs.StringVar(&o.RedirectURL, "redirect-url", "", "where GitHub redirects with the manifest code (optional)")
 	fs.BoolVar(&o.Public, "public", false, "allow installs by accounts other than the owner")
+	features := fs.String("features", "", "comma-separated opt-in features whose extra permissions the App requests: infra-rerun (Actions write), nightly (Actions write, Checks write)")
 	fs.Parse(args)
+	fl, err := github.ParseFeatures(strings.Split(*features, ","))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	o.Features = fl
 	m, err := github.NewManifest(o)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
