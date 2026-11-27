@@ -22,6 +22,7 @@ func (otherSystem) Mount(string, string, string, string) error           { retur
 func (otherSystem) Chown(string, int, int) error                         { return errNotLinux }
 func (otherSystem) Run(context.Context, Command) (int, error)            { return 0, errNotLinux }
 func (otherSystem) Quiesce(context.Context, []string) error              { return errNotLinux }
+func (otherSystem) StopProcesses(context.Context, []string)              {}
 func (otherSystem) PowerOff() error                                      { return errNotLinux }
 
 // AcceptVsock is Linux-only.

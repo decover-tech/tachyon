@@ -34,6 +34,9 @@ type fakeSys struct {
 	// quiesced is the dirs passed to Quiesce; quiesceErr is its result.
 	quiesced   []string
 	quiesceErr error
+	// stopped is the dirs passed to StopProcesses; onStop runs inside it.
+	stopped []string
+	onStop  func()
 }
 
 func newFakeSys() *fakeSys {
@@ -92,6 +95,16 @@ func (f *fakeSys) Quiesce(_ context.Context, dirs []string) error {
 	defer f.mu.Unlock()
 	f.quiesced = append(f.quiesced, dirs...)
 	return f.quiesceErr
+}
+
+func (f *fakeSys) StopProcesses(_ context.Context, dirs []string) {
+	f.mu.Lock()
+	f.stopped = append(f.stopped, dirs...)
+	onStop := f.onStop
+	f.mu.Unlock()
+	if onStop != nil {
+		onStop()
+	}
 }
 
 func (f *fakeSys) PowerOff() error {
@@ -667,6 +680,23 @@ func TestPrebuildSecretScanFails(t *testing.T) {
 				t.Error("matched token logged")
 			}
 		})
+	}
+}
+
+// The warm steps' processes are stopped before the scan: a file one of them
+// moves until it is killed is scanned where it ends up.
+func TestPrebuildScansAfterStoppingProcesses(t *testing.T) {
+	e := newTestEnv(t)
+	l := e.agent.Layout
+	e.sys.onStop = func() {
+		e.touch(t, filepath.Join(l.JobMount, "upper/home/runner/moved.txt"), "token=ghp_"+strings.Repeat("a", 36))
+	}
+	res := e.agent.Run(context.Background(), prebuildPayload())
+	if !slices.Equal(e.sys.stopped, []string{l.Root, l.JobMount}) {
+		t.Errorf("stopped = %q", e.sys.stopped)
+	}
+	if res.SecretScanClean == nil || *res.SecretScanClean {
+		t.Fatalf("secret scan = %v; the scan ran before the processes were stopped", res.SecretScanClean)
 	}
 }
 

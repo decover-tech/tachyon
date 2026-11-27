@@ -578,9 +578,11 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		}
 	}
 
-	// Scrub known credential files, then scan whatever is left in the
-	// writable layer. Removing through the overlay leaves whiteouts, so the
-	// files are gone from the snapshot too.
+	// Stop what the warm steps left running (dockerd, background jobs), so
+	// nothing changes the layer while it is scrubbed and scanned. Then scrub
+	// known credential files and scan whatever is left. Removing through the
+	// overlay leaves whiteouts, so the files are gone from the snapshot too.
+	a.Sys.StopProcesses(ctx, []string{l.Root, l.JobMount})
 	for _, s := range pb.ScrubPaths {
 		gp, err := a.guestPath(s, true)
 		if err != nil {
