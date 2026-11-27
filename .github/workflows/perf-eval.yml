@@ -1,0 +1,73 @@
+# perf-only: lives on perf/instrumentation and is never merged to main.
+#
+# Every push to perf/instrumentation (a rebuild from ops/loop/perf-branch.manifest,
+# or a perf-only commit) deploys that commit to the staging perf host, runs
+# the eval jobs, and posts each job's latency breakdown to the run summary,
+# with the raw timelines as an artifact. The host runs only for the eval:
+# it is stopped afterwards, and kept running only when the run fails (to
+# debug) or ops/loop/eval.conf sets KEEP_VM=1.
+#
+# Needs (ops/loop/iam/README.md): the IAM role in the staging account, and
+# repository secrets TACHYON_PERF_ROLE_ARN and TACHYON_PERF_SSH_KEY.
+name: perf-eval
+
+on:
+  push:
+    branches: [perf/instrumentation]
+
+# One eval at a time on the one host; a newer push waits for the current run.
+concurrency:
+  group: perf-eval
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write # GitHub OIDC -> the staging IAM role
+
+jobs:
+  eval:
+    runs-on: ubuntu-24.04
+    # The first run builds the base image on the host (over an hour on the
+    # small instance); later runs rebuild it only when its inputs change.
+    timeout-minutes: 240
+    env:
+      CONFIGURED: ${{ secrets.TACHYON_PERF_ROLE_ARN != '' && secrets.TACHYON_PERF_SSH_KEY != '' }}
+    steps:
+      - name: Not configured
+        if: env.CONFIGURED != 'true'
+        run: echo "perf-eval skipped - set up the IAM role and secrets (ops/loop/iam/README.md)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v4
+        if: env.CONFIGURED == 'true'
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: env.CONFIGURED == 'true'
+        with:
+          role-to-assume: ${{ secrets.TACHYON_PERF_ROLE_ARN }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+
+      - name: Eval
+        if: env.CONFIGURED == 'true'
+        env:
+          TACHYON_PERF_SSH_KEY: ${{ secrets.TACHYON_PERF_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$TACHYON_PERF_SSH_KEY" > "$RUNNER_TEMP/host.pem"
+          # Settings for this branch's runs (jobs, label, KEEP_VM, ...).
+          if [ -f ops/loop/eval.conf ]; then set -a; . ops/loop/eval.conf; set +a; fi
+          cp ops/loop/eval.sh "$RUNNER_TEMP/eval.sh"
+          EVAL_SSH_KEY="$RUNNER_TEMP/host.pem" EVAL_OPEN_SSH=1 EVAL_OUT=eval-out \
+            bash "$RUNNER_TEMP/eval.sh"
+
+      - uses: actions/upload-artifact@v4
+        if: always() && env.CONFIGURED == 'true'
+        with:
+          name: perf-eval-${{ github.sha }}
+          path: |
+            eval-out/eval.json
+            eval-out/eval.md
+            eval-out/services.log
+          if-no-files-found: ignore
+          retention-days: 30

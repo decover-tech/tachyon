@@ -1,0 +1,25 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Find",
+      "Effect": "Allow",
+      "Action": ["ec2:DescribeInstances", "ec2:DescribeSecurityGroups"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "StartStopPerfHostOnly",
+      "Effect": "Allow",
+      "Action": ["ec2:StartInstances", "ec2:StopInstances"],
+      "Resource": "arn:aws:ec2:us-east-1:010928200670:instance/*",
+      "Condition": { "StringEquals": { "aws:ResourceTag/Project": "tachyon-perf" } }
+    },
+    {
+      "Sid": "OpenSshForThisRunOnly",
+      "Effect": "Allow",
+      "Action": ["ec2:AuthorizeSecurityGroupIngress", "ec2:RevokeSecurityGroupIngress"],
+      "Resource": "arn:aws:ec2:us-east-1:010928200670:security-group/*",
+      "Condition": { "StringEquals": { "aws:ResourceTag/Project": "tachyon-perf" } }
+    }
+  ]
+}
