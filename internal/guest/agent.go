@@ -417,8 +417,8 @@ func (a *Agent) validWorkspace(ws string) bool {
 }
 
 // warmRecordPath, in the runner's home, says where and from which commit a
-// prebuild's warm steps built its outputs. Refreshes only fetch a newer
-// commit, so they keep it; tachyon/warm reads the commit.
+// prebuild's outputs were built. Refreshes only fetch a newer commit, so
+// they keep it; tachyon/warm reads the commit.
 const warmRecordPath = ".tachyon/prebuild"
 
 var commitRe = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
@@ -639,7 +639,8 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 			break
 		}
 	}
-	if code == 0 && len(pb.WarmCommands) > 0 {
+	// A refresh with no warm steps keeps the record of the build it forked.
+	if code == 0 && (!pb.Refresh || len(pb.WarmCommands) > 0) {
 		if err := a.writeWarmRecord(ws, p.Env["TACHYON_PREBUILD_COMMIT"]); err != nil {
 			return 0, fmt.Errorf("warm record: %w", err)
 		}

@@ -949,3 +949,20 @@ func TestStashFromRecordedWorkspace(t *testing.T) {
 		t.Errorf("node_modules not stashed from %s: %v", ws, err)
 	}
 }
+
+func TestCloneOnlyPrebuildRecordsWorkspace(t *testing.T) {
+	e := newTestEnv(t)
+	ws := "/home/runner/actions-runner/_work/kosha/kosha"
+	p := prebuildPayload()
+	p.Env["TACHYON_WORKSPACE"] = ws
+	p.Env["TACHYON_PREBUILD_COMMIT"] = warmCommit
+	p.Prebuild.WarmCommands = nil
+	p.Prebuild.CloneCommands = []string{"git fetch"}
+	p.Prebuild.CloneTokenB64 = base64.StdEncoding.EncodeToString([]byte("tok"))
+	if res := e.agent.Run(context.Background(), p); res.ExitCode != 0 {
+		t.Fatalf("exit code %d\n%s", res.ExitCode, e.logs)
+	}
+	if r := e.agent.readWarmRecord(); r.Workspace != ws || r.Commit != warmCommit {
+		t.Errorf("warm record = %+v", r)
+	}
+}
