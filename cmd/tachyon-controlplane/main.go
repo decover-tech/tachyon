@@ -52,6 +52,9 @@ func main() {
 	image := flag.String("image", "ubuntu-24.04=2026-11-16", "comma-separated name=version image pins")
 	appID := flag.Int64("github-app-id", 0, "GitHub App ID")
 	keyFile := flag.String("github-app-key", "", "GitHub App private key (PEM)")
+	// perf-only: point the GitHub client at the eval harness's fake API
+	// (cmd/tachyon-eval fakegh). Empty: https://api.github.com.
+	githubAPI := flag.String("github-api-url", "", "GitHub REST API base URL (perf eval only)")
 	cacheURL := flag.String("cache-url", "", "regional Actions cache URL")
 	npmMirror := flag.String("mirror-npm", "", "npm mirror URL")
 	goMirror := flag.String("mirror-go", "", "Go module proxy URL")
@@ -250,7 +253,7 @@ func main() {
 		log.Error("metrics", "err", err)
 		os.Exit(1)
 	}
-	ghClient := &github.Client{AppID: *appID, PrivateKey: key}
+	ghClient := &github.Client{AppID: *appID, PrivateKey: key, BaseURL: *githubAPI}
 	pbManager := &prebuild.Manager{
 		Source:      &github.PrebuildSource{Client: ghClient},
 		Images:      pins,
