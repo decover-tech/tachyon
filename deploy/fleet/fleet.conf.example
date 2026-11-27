@@ -37,6 +37,7 @@ IMAGES=/var/lib/tachyon/base                     # base image store (prepare-ima
 #IMAGE_TRUST_SOURCE=/root/image-trust.pem
 
 # ---- artifacts: URL (https only) or local path, with a mandatory SHA-256 ----
+# Cloud Hypervisor and ch-remote must accept image_type on disks (v55+).
 CH_SOURCE=https://example.invalid/cloud-hypervisor
 CH_SHA256=
 CH_REMOTE_SOURCE=https://example.invalid/ch-remote

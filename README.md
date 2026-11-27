@@ -158,7 +158,7 @@ Observability is optional. Set `OTEL_EXPORTER_OTLP_ENDPOINT` (OTLP/HTTP, e.g. `h
 | `TACHYON_IMAGES_KEEP` | no | unset: never delete images. N (at least 2 is enforced): hostd deletes older versions beyond the newest N per image name, never one a running job or warm VM uses |
 | `TACHYON_EGRESS_MBIT` | no | `1000` (per-VM egress limit; `0` disables) |
 | `TACHYON_MIRRORS` | no | comma list of mirror URLs, hosts or CIDRs every VM (including prebuild builds) may reach |
-| `TACHYON_DNS` | no | comma list of IPv4 DNS servers guests may query |
+| `TACHYON_DNS` | no | `1.1.1.1,8.8.8.8` (the base image's resolvers): comma list of IPv4 DNS servers guests may query |
 | `TACHYON_PEER_ADDRESS` | no | address peers use to pull snapshots from this host, e.g. `http://h1.internal:7443`; unset = serve no pulls |
 | `TACHYON_PEER_LISTEN`, `TACHYON_IMAGES_DIR` | no | `0.0.0.0:7443`, `/var/lib/tachyon/images` (base images as `<name@version>.img`) |
 | `TACHYON_STATE_DIR` | no | `/var/lib/tachyon/hostd`: unacked job events/results and running-job markers, kept across restarts |

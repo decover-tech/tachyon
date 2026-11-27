@@ -109,16 +109,26 @@ func (s *LinuxSystem) Run(ctx context.Context, c Command) (int, error) {
 		Setsid:     true,
 		Pdeathsig:  syscall.SIGKILL,
 	}
+	// A writer that isn't an *os.File is fed through a pipe, and Wait waits
+	// for every holder of it, including daemons a step left running. Stop
+	// waiting soon after the process exits; Quiesce stops the daemons.
+	cmd.WaitDelay = outputWaitDelay
 	err := cmd.Run()
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		return ee.ExitCode(), nil
+	}
+	if errors.Is(err, exec.ErrWaitDelay) {
+		return 0, nil
 	}
 	if err != nil {
 		return 0, err
 	}
 	return 0, nil
 }
+
+// outputWaitDelay bounds how long Run reads output after the process exits.
+const outputWaitDelay = 2 * time.Second
 
 func orDiscard(w io.Writer) io.Writer {
 	if w == nil {
@@ -130,8 +140,8 @@ func orDiscard(w io.Writer) io.Writer {
 // fifreeze is FIFREEZE, _IOWR('X', 119, int); x/sys/unix doesn't define it.
 const fifreeze = 0xc0045877
 
-func (s *LinuxSystem) Quiesce(ctx context.Context, dirs []string) error {
-	under := func(p string) bool {
+func underAny(dirs []string) func(string) bool {
+	return func(p string) bool {
 		for _, d := range dirs {
 			if underDir(p, d) {
 				return true
@@ -139,15 +149,23 @@ func (s *LinuxSystem) Quiesce(ctx context.Context, dirs []string) error {
 		}
 		return false
 	}
+}
 
-	// Stop everything the job left running (dockerd, background builds):
-	// anything chrooted into, or working in, the job's tree. Keep killing
-	// until none are left, so a process forked mid-scan is caught too.
+// StopProcesses kills anything chrooted into, or working in, dirs. It keeps
+// killing until none are left, so a process forked mid-scan is caught too.
+func (s *LinuxSystem) StopProcesses(ctx context.Context, dirs []string) {
+	under := underAny(dirs)
 	for killUnder(under) > 0 {
 		if !sleepCtx(ctx, 20*time.Millisecond) {
-			break // whatever is still alive is handled by freezing below
+			return
 		}
 	}
+}
+
+func (s *LinuxSystem) Quiesce(ctx context.Context, dirs []string) error {
+	under := underAny(dirs)
+	// Whatever is still alive after this is handled by freezing below.
+	s.StopProcesses(ctx, dirs)
 
 	mounts, err := readMountinfo()
 	if err != nil {

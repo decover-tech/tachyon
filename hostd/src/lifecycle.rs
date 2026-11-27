@@ -378,6 +378,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         }
 
         let mut vm = self.take_vm(&image, job.vcpu, job.memory_gb)?;
+        let mut guest_failure = String::new();
         let run = (|| -> Result<pb::job_result::Outcome> {
             self.hv.set_cpu_weight(&mut vm, job.cpu_weight.max(1))?;
             self.hv
@@ -454,9 +455,13 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
                 return Ok(pb::job_result::Outcome::Cancelled);
             }
             let guest = waited?;
+            guest_failure = guest.failure.clone();
             events(pb::Phase::JobFinished);
             if building.is_some() && guest.secret_scan_clean != Some(true) {
-                anyhow::bail!("prebuild secret scan failed or did not run");
+                anyhow::bail!(
+                    "prebuild secret scan failed or did not run: {}",
+                    guest.failure
+                );
             }
             Ok(if guest.exit_code == 0 {
                 pb::job_result::Outcome::Succeeded
@@ -474,6 +479,7 @@ impl<H: Hypervisor, S: Storage> Agent<H, S> {
         let outcome = run?;
         result.set_outcome(outcome);
         if outcome != pb::job_result::Outcome::Succeeded {
+            result.error = guest_failure;
             return Ok(());
         }
 

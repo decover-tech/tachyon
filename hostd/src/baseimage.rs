@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use crate::hypervisor::IN_JAIL_DIR;
 use crate::jailer::JailSpec;
+use crate::network::TAP;
 use crate::pb;
 
 /// VM sizes in vCPU.
@@ -42,6 +43,34 @@ pub const GUEST_READY_PORT: u32 = 1025;
 const SIGNING_CONTEXT: &[u8] = b"tachyon-base-image-manifest-v1\x00";
 /// Written into a snapshot directory last; its absence means incomplete.
 const READY_MARKER: &str = ".tachyon-ready";
+/// Contents of a ready marker. Bump when snapshots change shape (2: the VM
+/// has a NIC on tap0), so prepare rebuilds older ones and hosts refuse them.
+const SNAPSHOT_FORMAT: &[u8] = b"2\n";
+
+/// The builder's VMM writes the snapshot as its own user, mode 0600; every
+/// job VM restores it under a different per-slot user. Hand it to hostd's
+/// user, read-only for everyone.
+fn seal(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    // SAFETY: geteuid and getegid cannot fail.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    std::os::unix::fs::chown(dir, Some(uid), Some(gid))?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
+    for e in fs::read_dir(dir)? {
+        let path = e?.path();
+        std::os::unix::fs::lchown(&path, Some(uid), Some(gid))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444))?;
+    }
+    Ok(())
+}
+
+fn marker_current(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|c| c == SNAPSHOT_FORMAT)
+}
+
+/// The snapshot's virtio-net MAC. Every restored VM reuses it: each sits
+/// alone on its own tap in its own namespace.
+pub const GUEST_MAC: &str = "52:54:00:7a:c0:02";
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct Blob {
@@ -265,7 +294,7 @@ impl ImageStore {
         let mut built = Vec::new();
         for &vcpu in &m.sizes {
             let out = self.snapshot_dir(image, vcpu)?;
-            if out.join(READY_MARKER).exists() {
+            if marker_current(&out.join(READY_MARKER)) {
                 continue;
             }
             let tmp = out.with_file_name(format!(".{vcpu}.tmp"));
@@ -282,12 +311,13 @@ impl ImageStore {
             builder
                 .build(&spec, &tmp)
                 .with_context(|| format!("{image}: snapshot {vcpu} vCPU"))?;
-            fs::write(tmp.join(READY_MARKER), b"")?;
+            seal(&tmp).with_context(|| format!("{image}: seal snapshot {vcpu} vCPU"))?;
+            fs::write(tmp.join(READY_MARKER), SNAPSHOT_FORMAT)?;
             fs::rename(&tmp, &out)?;
             built.push(vcpu);
         }
         // Every size the manifest lists is done: the image is usable.
-        fs::write(dir.join("snapshots").join(READY_MARKER), b"")?;
+        fs::write(dir.join("snapshots").join(READY_MARKER), SNAPSHOT_FORMAT)?;
         Ok(built)
     }
 
@@ -299,7 +329,9 @@ impl ImageStore {
         };
         for e in entries.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if check_ref(&name).is_ok() && e.path().join("snapshots").join(READY_MARKER).exists() {
+            if check_ref(&name).is_ok()
+                && marker_current(&e.path().join("snapshots").join(READY_MARKER))
+            {
                 out.push(name);
             }
         }
@@ -373,12 +405,7 @@ impl SnapshotSource {
                     bail!("job names no base image");
                 }
                 check_ref(image)?;
-                if !root
-                    .join(image)
-                    .join("snapshots")
-                    .join(READY_MARKER)
-                    .exists()
-                {
+                if !marker_current(&root.join(image).join("snapshots").join(READY_MARKER)) {
                     bail!("base image {image} is not prepared on this host");
                 }
                 Ok(image.to_string())
@@ -473,6 +500,9 @@ pub fn boot_args(spec: &BootSpec) -> Vec<String> {
         format!("file={},discard_writes=on", spec.rootfs.display()),
         "--vsock".into(),
         format!("cid=3,socket={IN_JAIL_DIR}/vsock.sock"),
+        // Restore reopens the tap by name in the job VM's namespace.
+        "--net".into(),
+        format!("tap={TAP},mac={GUEST_MAC}"),
         "--console".into(),
         "off".into(),
         "--serial".into(),
@@ -527,17 +557,22 @@ impl SnapshotBuilder for ChSnapshotBuilder {
         std::os::unix::fs::chown(&dir, Some(self.uid), Some(self.gid))?;
         std::os::unix::fs::chown(out, Some(self.uid), Some(self.gid))?;
         let jail = JailSpec {
-            job_id: id,
+            job_id: id.clone(),
             uid: self.uid,
             gid: self.gid,
             cgroup_parent: self.cgroup_parent.clone(),
             cpu_weight: 100 * spec.vcpu,
             memory_max_bytes: (u64::from(spec.memory_gb) << 30) + (512 << 20),
             bind: Some((dir.clone(), PathBuf::from(IN_JAIL_DIR))),
-            // Image preparation boots offline.
-            netns: None,
+            // Offline: the namespace holds only an unconnected tap, so the
+            // snapshot has the NIC every job VM's tap is attached to.
+            netns: Some(Path::new("/run/netns").join(&id)),
         };
-        jail.create_cgroup()?;
+        prep_netns(&id, self.uid, self.gid)?;
+        if let Err(e) = jail.create_cgroup() {
+            let _ = ip(&["netns", "del", &id]);
+            return Err(e);
+        }
         let mut cmd = Command::new(&self.binary);
         cmd.args(boot_args(spec))
             .stdin(Stdio::null())
@@ -554,9 +589,37 @@ impl SnapshotBuilder for ChSnapshotBuilder {
         let _ = child.kill();
         let _ = child.wait();
         let _ = jail.remove_cgroup();
+        let _ = ip(&["netns", "del", &id]);
         let _ = fs::remove_dir_all(&dir);
         result
     }
+}
+
+fn ip(args: &[&str]) -> Result<()> {
+    let out = Command::new("ip").args(args).output().context("spawn ip")?;
+    if !out.status.success() {
+        bail!(
+            "ip {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// A namespace holding only `tap0`, owned by the snapshot VM's user.
+fn prep_netns(ns: &str, uid: u32, gid: u32) -> Result<()> {
+    let _ = ip(&["netns", "del", ns]);
+    ip(&["netns", "add", ns])?;
+    let (uid, gid) = (uid.to_string(), gid.to_string());
+    let r = ip(&[
+        "-n", ns, "tuntap", "add", "dev", TAP, "mode", "tap", "user", &uid, "group", &gid,
+    ])
+    .and_then(|()| ip(&["-n", ns, "link", "set", TAP, "up"]));
+    if r.is_err() {
+        let _ = ip(&["netns", "del", ns]);
+    }
+    r
 }
 
 #[cfg(test)]
@@ -648,6 +711,42 @@ mod tests {
             .prepare("ubuntu-24.04@2026-11-16", &trusted, &b)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn older_snapshot_format_is_rebuilt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = store(&tmp);
+        let k = key();
+        let dir = stage(&s, "ubuntu-24.04@2026-11-16", &k);
+        let b = FakeBuilder::default();
+        let trusted = [k.verifying_key()];
+        s.prepare("ubuntu-24.04@2026-11-16", &trusted, &b).unwrap();
+        // Markers from before SNAPSHOT_FORMAT were empty.
+        fs::write(dir.join("snapshots/4").join(READY_MARKER), b"").unwrap();
+        fs::write(dir.join("snapshots").join(READY_MARKER), b"").unwrap();
+        assert!(s.ready().is_empty(), "old-format image reported ready");
+        let built = s.prepare("ubuntu-24.04@2026-11-16", &trusted, &b).unwrap();
+        assert_eq!(built, vec![4]);
+        assert_eq!(s.ready(), vec!["ubuntu-24.04@2026-11-16".to_string()]);
+    }
+
+    #[test]
+    fn prepared_snapshot_is_readable_by_every_vm_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let s = store(&tmp);
+        let k = key();
+        let dir = stage(&s, "ubuntu-24.04@2026-11-16", &k);
+        s.prepare(
+            "ubuntu-24.04@2026-11-16",
+            &[k.verifying_key()],
+            &FakeBuilder::default(),
+        )
+        .unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir.join("snapshots/4")), 0o755);
+        assert_eq!(mode(&dir.join("snapshots/4/config.json")), 0o444);
     }
 
     #[test]
@@ -759,7 +858,7 @@ mod tests {
         for r in refs {
             let snaps = tmp.path().join(r).join("snapshots");
             fs::create_dir_all(&snaps).unwrap();
-            fs::write(snaps.join(READY_MARKER), b"").unwrap();
+            fs::write(snaps.join(READY_MARKER), SNAPSHOT_FORMAT).unwrap();
         }
         SnapshotSource::Store(tmp.path().to_path_buf())
     }
@@ -858,6 +957,7 @@ mod tests {
         assert!(s.contains("--pmem file=/img/rootfs.ext4,discard_writes=on"));
         assert!(s.contains(&format!("--vsock cid=3,socket={IN_JAIL_DIR}/vsock.sock")));
         assert!(s.contains(&format!("--api-socket path={IN_JAIL_DIR}/api.sock")));
+        assert!(s.contains(&format!("--net tap=tap0,mac={GUEST_MAC}")));
     }
 
     #[test]

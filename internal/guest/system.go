@@ -30,6 +30,9 @@ type System interface {
 	// block-backed filesystem that cannot be unmounted is frozen instead.
 	// An error means the disks may not be consistent.
 	Quiesce(ctx context.Context, dirs []string) error
+	// StopProcesses kills the processes the job left running under dirs
+	// (dockerd, background builds) until none are left.
+	StopProcesses(ctx context.Context, dirs []string)
 	PowerOff() error
 }
 

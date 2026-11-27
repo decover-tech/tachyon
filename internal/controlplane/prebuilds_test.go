@@ -100,6 +100,9 @@ func TestPrebuildPushBuildRegisterRefresh(t *testing.T) {
 	if a.GetPrebuildSnapshotId() != "" || b.GetRefresh() || len(b.GetWarmCommands()) != 1 || b.GetWarmCommands()[0] != "npm ci" {
 		t.Errorf("first build should warm on an empty disk: snap=%q build=%v", a.GetPrebuildSnapshotId(), b)
 	}
+	if env := a.GetGuest().GetEnv(); env["TACHYON_PREBUILD_COMMIT"] != pbSHA1 || env["TACHYON_WORKSPACE"] != "/home/runner/actions-runner/_work/api/api" {
+		t.Errorf("prebuild env commit=%q workspace=%q", env["TACHYON_PREBUILD_COMMIT"], env["TACHYON_WORKSPACE"])
+	}
 	if len(a.GetGuest().GetRunnerConfig()) != 0 {
 		t.Error("prebuild VM got a runner config")
 	}

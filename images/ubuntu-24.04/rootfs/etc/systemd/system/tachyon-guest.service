@@ -1,6 +1,9 @@
 [Unit]
 Description=Tachyon guest agent
-After=systemd-networkd.service
+# hostd snapshots the VM as soon as the agent answers; eth0 must already be
+# configured then, or every restored VM comes up without an address.
+Wants=systemd-networkd-wait-online.service
+After=systemd-networkd-wait-online.service
 DefaultDependencies=no
 
 [Service]

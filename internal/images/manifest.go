@@ -96,6 +96,10 @@ type Source struct {
 	// BaseRootfsSHA256 is the digest of the Ubuntu cloud image root
 	// filesystem the build started from.
 	BaseRootfsSHA256 string `json:"base_rootfs_sha256"`
+	// ActionsRunnerSHA256 is the digest of the GitHub Actions runner
+	// release installed in the image. Empty in images built before it was
+	// recorded.
+	ActionsRunnerSHA256 string `json:"actions_runner_sha256,omitempty"`
 	// APTSnapshot pins every apt install to snapshot.ubuntu.com at this
 	// timestamp (upstream's APT_SNAPSHOT_TIMESTAMP).
 	APTSnapshot string `json:"apt_snapshot"`
@@ -151,6 +155,9 @@ func (m *Manifest) Validate() error {
 	}
 	if s.APTSnapshot == "" || !hexRe.MatchString(s.PlanSHA256) || !hexRe.MatchString(s.BaseRootfsSHA256) {
 		return errors.New("source: apt snapshot, plan digest and base rootfs digest are required")
+	}
+	if s.ActionsRunnerSHA256 != "" && !hexRe.MatchString(s.ActionsRunnerSHA256) {
+		return errors.New("source: actions runner digest is not a sha256")
 	}
 	if m.SourceDateEpoch <= 0 {
 		return errors.New("source_date_epoch is required")
@@ -227,6 +234,7 @@ func Diff(a, b *Manifest) []string {
 	}
 	add("source.runner_images_commit", a.Source.RunnerImagesCommit, b.Source.RunnerImagesCommit)
 	add("source.base_rootfs_sha256", a.Source.BaseRootfsSHA256, b.Source.BaseRootfsSHA256)
+	add("source.actions_runner_sha256", a.Source.ActionsRunnerSHA256, b.Source.ActionsRunnerSHA256)
 	add("source.apt_snapshot", a.Source.APTSnapshot, b.Source.APTSnapshot)
 	add("source.plan_sha256", a.Source.PlanSHA256, b.Source.PlanSHA256)
 	add("source_date_epoch", fmt.Sprint(a.SourceDateEpoch), fmt.Sprint(b.SourceDateEpoch))

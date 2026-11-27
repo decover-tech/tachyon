@@ -121,8 +121,8 @@ func TestAdapterBacksOffAfterServerErrors(t *testing.T) {
 	h := newHarness(t)
 	h.a.Budget = &Budget{BackoffBase: 10 * time.Second}
 	h.api.err = &APIError{Status: http.StatusBadGateway, Remaining: -1}
-	if code := h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret); code != http.StatusInternalServerError {
-		t.Fatalf("status %d, want 500 so GitHub keeps the delivery", code)
+	if code := h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret); code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202: GitHub never redelivers, so the job is kept for reconcile", code)
 	}
 	// Within the backoff the next job is held, not sent to a failing API.
 	if code := h.post("workflow_job", jobEvent("queued", 2, tachyonLabels, ""), testSecret); code != http.StatusAccepted {
@@ -134,8 +134,8 @@ func TestAdapterBacksOffAfterServerErrors(t *testing.T) {
 	h.api.err = nil
 	h.clock = h.clock.Add(10 * time.Second)
 	h.a.Reconcile(context.Background())
-	if len(h.core.subs) != 1 || h.core.subs[0].Spec.JobID != "gh_2" {
-		t.Fatalf("subs = %+v", h.core.subs)
+	if len(h.core.subs) != 2 {
+		t.Fatalf("subs = %+v, want both jobs", h.core.subs)
 	}
 }
 
@@ -287,5 +287,57 @@ func TestAdapterInfraErrorBeforeStartRedispatches(t *testing.T) {
 	}
 	if len(h.api.reruns) != 0 {
 		t.Errorf("reruns = %v", h.api.reruns)
+	}
+}
+
+func TestAdapterServerErrorJobIsReconciled(t *testing.T) {
+	h := newHarness(t)
+	h.api.err = &APIError{Status: http.StatusInternalServerError, Remaining: -1}
+	if code := h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret); code != http.StatusAccepted {
+		t.Fatalf("status %d, want 202: a job hit by a GitHub 5xx is kept for reconcile", code)
+	}
+	if len(h.core.subs) != 0 {
+		t.Fatalf("subs = %d", len(h.core.subs))
+	}
+	h.api.err = nil
+	h.clock = h.clock.Add(time.Minute) // past the budget's 5xx backoff
+	h.a.Reconcile(context.Background())
+	if len(h.core.subs) != 1 {
+		t.Fatalf("subs = %d after GitHub recovered, want 1", len(h.core.subs))
+	}
+}
+
+func TestAdapterRedispatchesJobWhoseRunnerWasTaken(t *testing.T) {
+	h := newHarness(t)
+	h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret)
+	h.post("workflow_job", jobEvent("queued", 2, tachyonLabels, ""), testSecret)
+	taken := h.api.created[1] // job 2's runner
+	h.post("workflow_job", jobEvent("in_progress", 1, tachyonLabels, taken), testSecret)
+
+	h.a.Reconcile(context.Background()) // no wait for ReconcileAfter
+	if len(h.core.subs) != 3 {
+		t.Fatalf("subs = %d, want job 2 re-dispatched at once", len(h.core.subs))
+	}
+	if id := h.core.subs[2].Spec.JobID; id != "gh_2-2" {
+		t.Fatalf("retry job ID = %q, want a new ID the core has not placed", id)
+	}
+	if len(h.api.deleted) != 0 {
+		t.Fatalf("deleted %v: the taken runner is running job 1", h.api.deleted)
+	}
+	if ref := h.a.jobs["gh_2-2"]; ref == nil || ref.githubJobID != 2 {
+		t.Fatal("retry ID not mapped back to the GitHub job")
+	}
+}
+
+func TestAdapterRobbedRetryMappedAfterRobbedVMResult(t *testing.T) {
+	h := newHarness(t)
+	h.post("workflow_job", jobEvent("queued", 1, tachyonLabels, ""), testSecret)
+	h.post("workflow_job", jobEvent("queued", 2, tachyonLabels, ""), testSecret)
+	h.post("workflow_job", jobEvent("in_progress", 1, tachyonLabels, h.api.created[1]), testSecret)
+	// Job 2's VM ran job 1 and finished before job 2 was re-dispatched.
+	h.a.OnResult(context.Background(), jobapi.Result{JobID: "gh_2", Outcome: jobapi.OutcomeSucceeded})
+	h.a.Reconcile(context.Background())
+	if ref := h.a.jobs["gh_2-2"]; ref == nil || ref.githubJobID != 2 || ref.repo == "" {
+		t.Fatalf("retry ID mapping = %+v", ref)
 	}
 }

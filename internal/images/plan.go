@@ -24,6 +24,10 @@ type Config struct {
 	// BaseRootfs is the Ubuntu cloud image root filesystem the build starts
 	// from, as GitHub's image starts from a cloud VM image. Pinned by digest.
 	BaseRootfs BaseRootfs `yaml:"base_rootfs"`
+	// ActionsRunner is the GitHub Actions runner release installed at
+	// /home/runner/actions-runner, where the guest agent starts it. GitHub's
+	// own image ships without it. Pinned by digest.
+	ActionsRunner Download `yaml:"actions_runner"`
 	// RootfsSizeGB is the ext4 file's size.
 	RootfsSizeGB int `yaml:"rootfs_size_gb"`
 	// Skip lists upstream build scripts Tachyon leaves out, each with a
@@ -42,7 +46,10 @@ type RunnerImages struct {
 	Toolset  string `yaml:"toolset"`
 }
 
-type BaseRootfs struct {
+type BaseRootfs = Download
+
+// Download is a file fetched over https and checked against its digest.
+type Download struct {
 	URL    string `yaml:"url"`
 	SHA256 string `yaml:"sha256"`
 }
@@ -77,6 +84,9 @@ func ParseConfig(data []byte) (*Config, error) {
 	}
 	if !strings.HasPrefix(c.BaseRootfs.URL, "https://") || !hexRe.MatchString(c.BaseRootfs.SHA256) {
 		return nil, errors.New("image.yml: base_rootfs needs an https url and its sha256")
+	}
+	if !strings.HasPrefix(c.ActionsRunner.URL, "https://") || !hexRe.MatchString(c.ActionsRunner.SHA256) {
+		return nil, errors.New("image.yml: actions_runner needs an https url and its sha256")
 	}
 	if c.RootfsSizeGB < 8 {
 		return nil, errors.New("image.yml: rootfs_size_gb must be at least 8")
@@ -330,6 +340,8 @@ func (c *Config) ShellEnv() string {
 		{"RUNNER_IMAGES_TOOLSET", c.RunnerImages.Toolset},
 		{"BASE_ROOTFS_URL", c.BaseRootfs.URL},
 		{"BASE_ROOTFS_SHA256", c.BaseRootfs.SHA256},
+		{"ACTIONS_RUNNER_URL", c.ActionsRunner.URL},
+		{"ACTIONS_RUNNER_SHA256", c.ActionsRunner.SHA256},
 		{"ROOTFS_SIZE_GB", fmt.Sprint(c.RootfsSizeGB)},
 	} {
 		fmt.Fprintf(&b, "%s=%s\n", kv[0], shellQuote(kv[1]))

@@ -249,6 +249,29 @@ func TestSubmitPartialWhenKeyFileChanged(t *testing.T) {
 	}
 }
 
+func TestSubmitSameCommitPrebuildNeedsItsCopyOnHost(t *testing.T) {
+	for _, tt := range []struct{ hostKey, want string }{{"pb1-new", "full"}, {"pb1-x", "partial"}} {
+		e := newEnv()
+		e.prebuilds.SetConfig("acme/api", &prebuild.Config{Version: 1, KeyFiles: []string{"go.sum"}, Paths: []string{"node_modules"}})
+		e.prebuilds.Register(prebuild.Snapshot{Repo: "acme/api", Key: "pb1-new", Commit: "abc", BaseImage: "ubuntu-24.04@v1", Healthy: true})
+		s := e.connect(t, "h1", "us", 16, 64)
+		ref := prebuildRef("acme/api", "snap")
+		ref.Key = tt.hostKey
+		s.push(t, heartbeat(false, ref))
+		if err := e.core.Hint(context.Background(), jobapi.Hint{Repo: "github.com/acme/api", Commit: "abc", ChangedFiles: []string{"go.sum"}}); err != nil {
+			t.Fatal(err)
+		}
+		s.next(t)
+		if err := e.core.Submit(context.Background(), e.submission(t, "j1", 2)); err != nil {
+			t.Fatal(err)
+		}
+		a := s.next(t).GetAssign()
+		if a.GetPrebuildMatch() != tt.want {
+			t.Errorf("host key %s: match = %q, want %q", tt.hostKey, a.GetPrebuildMatch(), tt.want)
+		}
+	}
+}
+
 func TestSubmitFallsBackWhenHostLacksPrebuild(t *testing.T) {
 	e := newEnv()
 	e.registerPrebuild()

@@ -1,16 +1,20 @@
 package guest
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -35,6 +39,10 @@ type Layout struct {
 	// Home is the runner user's home, inside Root. "~/" paths resolve here.
 	Home     string
 	UID, GID int
+	// Dockerd is the Docker daemon started for each job, inside Root
+	// ("" = none). The base image's own dockerd can't serve jobs: its
+	// /var/lib/docker is on the read-only root, not the job's volume.
+	Dockerd string
 	// RunnerCmd is the GitHub runner's run.sh, inside Root.
 	RunnerCmd string
 	// Workspace is where prebuild warm steps run and where jobs find the
@@ -57,12 +65,15 @@ func DefaultLayout() Layout {
 		Home:      "/home/runner",
 		UID:       1001,
 		GID:       1001,
+		Dockerd:   "/usr/bin/dockerd",
 		RunnerCmd: "/home/runner/actions-runner/run.sh",
 		Workspace: "/home/runner/work/_tachyon/workspace",
 		WarmStash: "/opt/tachyon/warm",
 		Shell:     "/bin/bash",
 	}
 }
+
+const toolCache = "/opt/hostedtoolcache"
 
 const defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
 
@@ -79,6 +90,10 @@ type Agent struct {
 // quiesceTimeout bounds how long Serve waits for the job's processes to
 // die and its filesystems to unmount before reporting.
 const quiesceTimeout = 30 * time.Second
+
+// dockerTimeout bounds the wait for dockerd's socket. A job that doesn't use
+// Docker still runs if it never appears.
+const dockerTimeout = 30 * time.Second
 
 // Serve reads one payload from conn, runs it, and writes the result back.
 // The caller powers the VM off afterwards.
@@ -132,6 +147,7 @@ func (a *Agent) run(ctx context.Context, p *Payload, res *Result) (int, error) {
 		return 0, fmt.Errorf("write files: %w", err)
 	}
 	env := a.env(p.Env)
+	a.startDocker(ctx)
 	if p.Prebuild != nil {
 		return a.prebuild(ctx, p, env, res)
 	}
@@ -139,6 +155,53 @@ func (a *Agent) run(ctx context.Context, p *Payload, res *Result) (int, error) {
 		return 0, fmt.Errorf("stash warm paths: %w", err)
 	}
 	return a.runRunner(ctx, p, env, res)
+}
+
+// startDocker starts dockerd as root inside the job's root, where
+// /var/lib/docker is the job's docker volume, and waits for its socket.
+// Quiesce stops it with everything else the job left running.
+func (a *Agent) startDocker(ctx context.Context) {
+	l := a.Layout
+	if l.Dockerd == "" {
+		return
+	}
+	if _, err := os.Stat(a.host(l.Dockerd)); err != nil {
+		return
+	}
+	// A prebuild clone carries the socket and pid file of the daemon that
+	// quiesce killed; the socket would pass the readiness check below.
+	sock := a.host("/run/docker.sock")
+	for _, f := range []string{sock, a.host("/run/docker.pid")} {
+		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			a.log().Warn("remove stale docker state", "path", f, "err", err)
+		}
+	}
+	go func() {
+		code, err := a.Sys.Run(ctx, Command{
+			Path: l.Dockerd,
+			// Steps run with no supplementary groups, so the socket's
+			// group must be the runner's own.
+			Args:   []string{"--group", strconv.Itoa(l.GID)},
+			Env:    []string{"PATH=" + defaultPath},
+			Dir:    "/",
+			Root:   l.Root,
+			Stdout: a.output(),
+			Stderr: a.output(),
+		})
+		a.log().Info("dockerd exited", "code", code, "err", err)
+	}()
+	deadline := time.Now().Add(dockerTimeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(sock); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	a.log().Warn("dockerd socket did not appear", "timeout", dockerTimeout)
 }
 
 func (a *Agent) quiesce(ctx context.Context) error {
@@ -338,6 +401,71 @@ func (a *Agent) writeFiles(files map[string]string) error {
 	return nil
 }
 
+// workspace is where the prebuild's warm steps run: $TACHYON_WORKSPACE, the
+// runner's checkout path for the repo, so build outputs that record absolute
+// paths (cargo fingerprints) stay valid in jobs. Anything outside the
+// runner's home falls back to Layout.Workspace.
+func (a *Agent) workspace(env map[string]string) string {
+	if ws := env["TACHYON_WORKSPACE"]; a.validWorkspace(ws) {
+		return ws
+	}
+	return a.Layout.Workspace
+}
+
+func (a *Agent) validWorkspace(ws string) bool {
+	return ws != "" && path.Clean(ws) == ws && strings.HasPrefix(ws, a.Layout.Home+"/")
+}
+
+// warmRecordPath, in the runner's home, says where and from which commit a
+// prebuild's outputs were built. Refreshes only fetch a newer commit, so
+// they keep it; tachyon/warm reads the commit.
+const warmRecordPath = ".tachyon/prebuild"
+
+var commitRe = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+
+type warmRecord struct{ Workspace, Commit string }
+
+func (a *Agent) readWarmRecord() warmRecord {
+	var r warmRecord
+	b, err := os.ReadFile(a.host(path.Join(a.Layout.Home, warmRecordPath)))
+	if err != nil {
+		return r
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, _ := strings.Cut(line, "=")
+		switch {
+		case k == "workspace" && a.validWorkspace(v):
+			r.Workspace = v
+		case k == "commit" && commitRe.MatchString(v):
+			r.Commit = v
+		}
+	}
+	return r
+}
+
+func (a *Agent) writeWarmRecord(ws, commit string) error {
+	if !commitRe.MatchString(commit) {
+		commit = ""
+	}
+	p := path.Join(a.Layout.Home, warmRecordPath)
+	if err := a.mkdirAll(path.Dir(p), true); err != nil {
+		return err
+	}
+	if err := os.WriteFile(a.host(p), []byte("workspace="+ws+"\ncommit="+commit+"\n"), 0o644); err != nil {
+		return err
+	}
+	return a.Sys.Chown(a.host(p), a.Layout.UID, a.Layout.GID)
+}
+
+// warmWorkspace is where the prebuild a job forked keeps its outputs.
+// Prebuilds from before the record existed kept them in Layout.Workspace.
+func (a *Agent) warmWorkspace() string {
+	if r := a.readWarmRecord(); r.Workspace != "" {
+		return r.Workspace
+	}
+	return a.Layout.Workspace
+}
+
 // env is the environment for the runner and warm steps. It never includes
 // the runner config.
 func (a *Agent) env(extra map[string]string) []string {
@@ -347,6 +475,10 @@ func (a *Agent) env(extra map[string]string) []string {
 		"LANG":               "C.UTF-8",
 		"PATH":               defaultPath,
 		"TACHYON_WARM_STASH": a.Layout.WarmStash,
+		// As on GitHub-hosted runners: setup-node/python/go find the image's
+		// (and the prebuild's) toolchains here, not in the runner's _work/_tool.
+		"AGENT_TOOLSDIRECTORY": toolCache,
+		"RUNNER_TOOL_CACHE":    toolCache,
 	}
 	for k, v := range extra {
 		m[k] = v
@@ -365,13 +497,14 @@ func (a *Agent) stashWarmPaths(env map[string]string) error {
 	if env["TACHYON_PREBUILD_MATCH"] != "full" || env["TACHYON_WARM_PATHS"] == "" {
 		return nil
 	}
+	base := a.warmWorkspace()
 	for _, p := range strings.Split(env["TACHYON_WARM_PATHS"], ":") {
 		if p == "" || path.IsAbs(p) || strings.Contains(p, "..") {
 			a.log().Warn("skipping unsafe warm path", "path", p)
 			continue
 		}
 		p = path.Clean(p)
-		src := path.Join(a.Layout.Workspace, p)
+		src := path.Join(base, p)
 		if _, err := os.Lstat(a.host(src)); err != nil {
 			a.log().Warn("warm path not in prebuild", "path", p)
 			continue
@@ -442,21 +575,29 @@ func (a *Agent) runRunner(ctx context.Context, p *Payload, env []string, res *Re
 func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Result) (int, error) {
 	pb := p.Prebuild
 	l := a.Layout
-	if err := a.mkdirAll(l.Workspace, true); err != nil {
+	ws := a.workspace(p.Env)
+	if pb.Refresh {
+		// Fetch the new commit where the forked prebuild's outputs are.
+		ws = a.warmWorkspace()
+	}
+	if err := a.mkdirAll(ws, true); err != nil {
 		return 0, err
 	}
 	code := 0
+	var last *tailWriter
 	step := func(stepEnv []string, c string) (int, error) {
+		last = &tailWriter{max: failureTail}
+		out := io.MultiWriter(a.output(), last)
 		return a.Sys.Run(ctx, Command{
 			Path:   l.Shell,
 			Args:   []string{"-euo", "pipefail", "-c", c},
 			Env:    stepEnv,
-			Dir:    l.Workspace,
+			Dir:    ws,
 			Root:   l.Root,
 			UID:    l.UID,
 			GID:    l.GID,
-			Stdout: a.output(),
-			Stderr: a.output(),
+			Stdout: out,
+			Stderr: out,
 		})
 	}
 	// The clone token is visible to the clone commands only.
@@ -476,6 +617,7 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 			}
 			if exit != 0 {
 				a.log().Error("clone step failed", "step", i+1, "exit_code", exit)
+				res.Failure = stepFailure("clone", i+1, exit, last.Bytes(), cloneToken)
 				code = exit
 				break
 			}
@@ -492,24 +634,33 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		}
 		if exit != 0 {
 			a.log().Error("warm step failed", "step", i+1, "exit_code", exit)
+			res.Failure = stepFailure("warm", i+1, exit, last.Bytes(), cloneToken)
 			code = exit
 			break
+		}
+	}
+	// A refresh with no warm steps keeps the record of the build it forked.
+	if code == 0 && (!pb.Refresh || len(pb.WarmCommands) > 0) {
+		if err := a.writeWarmRecord(ws, p.Env["TACHYON_PREBUILD_COMMIT"]); err != nil {
+			return 0, fmt.Errorf("warm record: %w", err)
 		}
 	}
 	for _, kp := range pb.KeepPaths {
 		gp, err := a.guestPath(kp, false)
 		if err != nil {
 			// Relative keep paths are inside the workspace.
-			gp = path.Join(l.Workspace, path.Clean(kp))
+			gp = path.Join(ws, path.Clean(kp))
 		}
 		if _, err := os.Lstat(a.host(gp)); err != nil {
 			a.log().Warn("prebuild path missing after warm steps", "path", kp)
 		}
 	}
 
-	// Scrub known credential files, then scan whatever is left in the
-	// writable layer. Removing through the overlay leaves whiteouts, so the
-	// files are gone from the snapshot too.
+	// Stop what the warm steps left running (dockerd, background jobs), so
+	// nothing changes the layer while it is scrubbed and scanned. Then scrub
+	// known credential files and scan whatever is left. Removing through the
+	// overlay leaves whiteouts, so the files are gone from the snapshot too.
+	a.Sys.StopProcesses(ctx, []string{l.Root, l.JobMount})
 	for _, s := range pb.ScrubPaths {
 		gp, err := a.guestPath(s, true)
 		if err != nil {
@@ -536,7 +687,28 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		a.log().Error("secret found in prebuild", "path", f.Path, "rule", f.Rule)
 	}
 	res.SecretScanClean = &clean
+	if !clean {
+		res.Failure = scanFailure(findings, err)
+	}
 	return code, nil
+}
+
+// scanFailure names what failed the secret scan: its error, or the files and
+// rules that matched (never the matched text).
+func scanFailure(findings []Finding, err error) string {
+	if err != nil {
+		return "secret scan: " + err.Error()
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "secret scan: %d finding(s):", len(findings))
+	for _, f := range findings {
+		if b.Len() > failureTail {
+			b.WriteString(" ...")
+			break
+		}
+		fmt.Fprintf(&b, " %s (%s)", f.Path, f.Rule)
+	}
+	return b.String()
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -547,3 +719,29 @@ func sortedKeys[V any](m map[string]V) []string {
 	sort.Strings(keys)
 	return keys
 }
+
+// failureTail bounds how much of a failed step's output Result.Failure keeps.
+const failureTail = 2048
+
+func stepFailure(kind string, n, exit int, out, token []byte) string {
+	if len(token) > 0 {
+		out = bytes.ReplaceAll(out, token, []byte("[redacted]"))
+	}
+	return fmt.Sprintf("%s step %d exited %d: %s", kind, n, exit, strings.ToValidUTF8(string(out), "?"))
+}
+
+// tailWriter keeps the last max bytes written to it.
+type tailWriter struct {
+	max int
+	buf []byte
+}
+
+func (t *tailWriter) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if over := len(t.buf) - t.max; over > 0 {
+		t.buf = append(t.buf[:0], t.buf[over:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailWriter) Bytes() []byte { return t.buf }

@@ -91,6 +91,8 @@ git -C "$ri" checkout -q FETCH_HEAD
 
 curl -fsSL --retry 3 -o "$work/base.tar.xz" "$BASE_ROOTFS_URL"
 echo "$BASE_ROOTFS_SHA256  $work/base.tar.xz" | sha256sum -c --quiet -
+curl -fsSL --retry 3 -o "$work/actions-runner.tar.gz" "$ACTIONS_RUNNER_URL"
+echo "$ACTIONS_RUNNER_SHA256  $work/actions-runner.tar.gz" | sha256sum -c --quiet -
 
 
 # ---- 2. Build plan: upstream template minus image.yml's trims ---------------
@@ -236,6 +238,11 @@ stop_dockerd
 for ((i = ${#mounts[@]} - 1; i >= 0; i--)); do umount -l "${mounts[i]}"; done
 mounts=()
 rm -f "$root/usr/sbin/policy-rc.d" "$root/usr/local/sbin/systemctl" "$root/usr/local/sbin/journalctl" "$root/run/docker.pid" "$root/etc/ssh/"ssh_host_*
+# tachyon-guest starts dockerd inside each job's root, on the job's docker
+# volume; a system dockerd would only hold the read-only image's /var/lib/docker.
+rm -f "$root/etc/systemd/system/multi-user.target.wants/docker.service" \
+	"$root/etc/systemd/system/multi-user.target.wants/containerd.service" \
+	"$root/etc/systemd/system/sockets.target.wants/docker.socket"
 if [[ $grub_stub == 1 ]]; then rm -f "$root/usr/sbin/update-grub"; fi
 rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 	"$root"/tmp/* "$root"/var/tmp/* "$root"/root/.cache "$root"/home/runner/.cache
@@ -245,6 +252,10 @@ rm -rf "$root"/var/lib/apt/lists/* "$root"/var/cache/apt/* "$root"/var/log/* \
 # ship files (resolv.conf) that they would otherwise empty.
 # The agent must be in the image: hostd boots it before taking the snapshot.
 install -D -m 0755 "$GUEST_BIN" "$root/usr/local/bin/tachyon-guest"
+# The agent runs the runner as uid 1001 from here (internal/guest Layout).
+install -d -o 1001 -g 1001 "$root/home/runner/actions-runner"
+tar -xzf "$work/actions-runner.tar.gz" -C "$root/home/runner/actions-runner" --no-same-owner
+chown -R 1001:1001 "$root/home/runner/actions-runner"
 if [[ -d $here/rootfs ]]; then
 	cp -a "$here/rootfs/." "$root/"
 fi

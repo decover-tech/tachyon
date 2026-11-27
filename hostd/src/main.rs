@@ -100,7 +100,9 @@ async fn main() -> Result<()> {
         config: network::NetConfig {
             egress_mbit: env_or("TACHYON_EGRESS_MBIT", "1000").parse()?,
             mirrors: network::parse_list(&env_or("TACHYON_MIRRORS", ""))?,
-            dns: parse_ips(&env_or("TACHYON_DNS", ""))?,
+            // The base image's resolv.conf names these; without them a
+            // prebuild build (restricted egress) cannot resolve anything.
+            dns: parse_ips(&env_or("TACHYON_DNS", "1.1.1.1,8.8.8.8"))?,
         },
         rules_dir: run_dir.join("net"),
         runner: Box::new(storage::ExecRunner),
@@ -334,6 +336,10 @@ fn recover<S: storage::Storage>(
 ) {
     let lost = recovery::report_interrupted(outbox);
     let vms = recovery::reap_vms(&agent.hv.run_dir, &agent.hv.cgroup_parent);
+    let links = agent.hv.net.reap().unwrap_or_else(|e| {
+        tracing::warn!(error = %format!("{e:#}"), "remove orphaned VM namespaces");
+        Vec::new()
+    });
     let disks = recovery::clean_job_disks(&agent.storage).unwrap_or_else(|e| {
         tracing::warn!(error = %format!("{e:#}"), "clean orphaned job disks");
         Vec::new()
@@ -345,6 +351,7 @@ fn recover<S: storage::Storage>(
     tracing::info!(
         interrupted_jobs = lost.len(),
         orphaned_vms = vms.len(),
+        orphaned_links = links.len(),
         orphaned_disks = disks.len(),
         snapshots,
         unacked = outbox.len(),

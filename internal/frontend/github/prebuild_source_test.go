@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,8 @@ import (
 	"testing"
 	"time"
 )
+
+const wideTree = 40000
 
 func TestTenantInstallation(t *testing.T) {
 	if id, err := tenantInstallation("gh_inst_42"); err != nil || id != 42 {
@@ -68,6 +71,18 @@ func TestPrebuildSource(t *testing.T) {
 			w.Write([]byte(`{"tree":[],"truncated":true}`))
 			return
 		}
+		if r.PathValue("sha") == "wide" {
+			// A real repo's tree is several MB of JSON.
+			fmt.Fprint(w, `{"tree":[`)
+			for i := range wideTree {
+				if i > 0 {
+					fmt.Fprint(w, ",")
+				}
+				fmt.Fprintf(w, `{"path":"src/components/some/deeply/nested/module_%05d.tsx","type":"blob"}`, i)
+			}
+			fmt.Fprint(w, `],"truncated":false}`)
+			return
+		}
 		w.Write([]byte(`{"tree":[{"path":"go.sum","type":"blob"},{"path":"web","type":"tree"},{"path":"web/package-lock.json","type":"blob"}],"truncated":false}`))
 	})
 	mux.HandleFunc("GET /repos/acme/api/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
@@ -108,6 +123,9 @@ func TestPrebuildSource(t *testing.T) {
 	files, err := s.Files(ctx, tenant, "acme/api", sha)
 	if err != nil || !reflect.DeepEqual(files, []string{"go.sum", "web/package-lock.json"}) {
 		t.Errorf("Files = %v, %v", files, err)
+	}
+	if files, err := s.Files(ctx, tenant, "acme/api", "wide"); err != nil || len(files) != wideTree {
+		t.Errorf("Files(wide) = %d files, %v", len(files), err)
 	}
 	if _, err := s.Files(ctx, tenant, "acme/api", "huge"); err == nil {
 		t.Error("truncated tree should fail")

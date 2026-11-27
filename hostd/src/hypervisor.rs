@@ -116,6 +116,9 @@ pub struct GuestResult {
     /// For prebuild builds: did the secret scan pass?
     #[serde(default)]
     pub secret_scan_clean: Option<bool>,
+    /// For failed prebuild builds: the failing step and its last output.
+    #[serde(default)]
+    pub failure: String,
 }
 
 /// Control messages hostd sends the guest agent after the payload, on the
@@ -297,7 +300,17 @@ impl Hypervisor for CloudHypervisor {
             agent: None,
             started: Instant::now(),
         };
-        wait_for_socket(&self.api_socket(&vm), Duration::from_secs(5))?;
+        if let Err(e) = wait_for_socket(&self.api_socket(&vm), Duration::from_secs(5)) {
+            let mut vm = vm;
+            let _ = vm.child.kill();
+            let _ = vm.child.wait();
+            let mut stderr = String::new();
+            if let Some(mut pipe) = vm.child.stderr.take() {
+                let _ = pipe.read_to_string(&mut stderr);
+            }
+            let _ = self.destroy(vm);
+            return Err(e.context(format!("cloud-hypervisor: {}", stderr.trim())));
+        }
         Ok(vm)
     }
 
@@ -330,7 +343,10 @@ impl Hypervisor for CloudHypervisor {
             vm,
             &[
                 "add-disk",
-                &format!("path={IN_JAIL_DIR}/disk-{serial},serial={serial},id={serial}"),
+                // Cloud Hypervisor v55+ rejects a disk without an image type.
+                &format!(
+                    "path={IN_JAIL_DIR}/disk-{serial},image_type=raw,serial={serial},id={serial}"
+                ),
             ],
         )
     }

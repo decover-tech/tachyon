@@ -274,6 +274,26 @@ impl HostNetwork {
         fs::create_dir_all(&self.rules_dir)?;
         fs::write(&path, render_host_rules())?;
         self.run("nft", &["-f", &path.to_string_lossy()])?;
+        self.allow_past_docker()
+    }
+
+    /// Docker's iptables FORWARD chain drops whatever isn't for its bridge,
+    /// and a drop in any nft base chain is final, so on a host running
+    /// Docker no VM traffic leaves. DOCKER-USER is Docker's hook for this.
+    fn allow_past_docker(&self) -> Result<()> {
+        if self.run("iptables", &["-S", "DOCKER-USER"]).is_err() {
+            return Ok(());
+        }
+        let veths = format!("{HOST_VETH_PREFIX}+");
+        for dir in ["-i", "-o"] {
+            let rule = [dir, veths.as_str(), "-j", "ACCEPT"];
+            if self
+                .run("iptables", &[&["-C", "DOCKER-USER"][..], &rule].concat())
+                .is_err()
+            {
+                self.run("iptables", &[&["-I", "DOCKER-USER"][..], &rule].concat())?;
+            }
+        }
         Ok(())
     }
 
@@ -387,11 +407,54 @@ impl HostNetwork {
 
     /// Deletes the namespace, which also removes its tap and both ends of
     /// the veth pair.
+    /// Deletes the VM namespaces a previous hostd left behind (their veth
+    /// pairs go with them); slots restart at 0, so they would collide.
+    pub fn reap(&self) -> Result<Vec<String>> {
+        let list = self.run("ip", &["netns", "list"])?;
+        let stale: Vec<String> = vm_namespaces(&list).map(str::to_owned).collect();
+        for ns in &stale {
+            let _ = fs::remove_file(self.rules_dir.join(format!("{ns}.nft")));
+            self.run("ip", &["netns", "del", ns])?;
+        }
+        // The kernel frees a deleted namespace, and the veth pair in it,
+        // asynchronously; delete the host ends now so setup can reuse them.
+        let links = self.run("ip", &["-o", "link", "show", "type", "veth"])?;
+        for veth in host_veths(&links) {
+            // Fails harmlessly if the kernel freed it since the listing.
+            if let Err(e) = self.run("ip", &["link", "del", veth]) {
+                tracing::warn!(veth, error = %format!("{e:#}"), "delete orphaned host veth");
+            }
+        }
+        Ok(stale)
+    }
+
     pub fn teardown(&self, l: &VmLink) -> Result<()> {
         let _ = fs::remove_file(self.rules_dir.join(format!("{}.nft", l.netns)));
         self.run("ip", &["netns", "del", &l.netns])?;
         Ok(())
     }
+}
+
+/// The `tachyon-vm<slot>` names in `ip netns list` output, which may carry
+/// an `(id: N)` suffix.
+fn vm_namespaces(list: &str) -> impl Iterator<Item = &str> {
+    list.lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|n| {
+            n.strip_prefix("tachyon-vm")
+                .is_some_and(|s| s.parse::<u32>().is_ok())
+        })
+}
+
+/// The `tvh<slot>` names in `ip -o link show` output (`7: tvh0@if2: <...`).
+fn host_veths(list: &str) -> impl Iterator<Item = &str> {
+    list.lines()
+        .filter_map(|l| l.split(": ").nth(1))
+        .map(|n| n.split('@').next().unwrap_or(n))
+        .filter(|n| {
+            n.strip_prefix(HOST_VETH_PREFIX)
+                .is_some_and(|s| s.parse::<u32>().is_ok())
+        })
 }
 
 /// Token bucket of 10 ms at the configured rate, at least 32 KiB.
@@ -597,6 +660,21 @@ mod tests {
                 ),
             ]))),
         }
+    }
+
+    #[test]
+    fn only_vm_namespaces_are_reaped() {
+        let list = "tachyon-vm3 (id: 3)\nsnapshot-4\ntachyon-vm0\ntachyon-vmx\nother (id: 9)\n";
+        assert_eq!(
+            vm_namespaces(list).collect::<Vec<_>>(),
+            ["tachyon-vm3", "tachyon-vm0"]
+        );
+    }
+
+    #[test]
+    fn only_vm_host_veths_are_reaped() {
+        let list = "7: tvh0@if2: <BROADCAST,UP> mtu 1500\n9: tvhx@if2: <UP>\n11: veth1@if3: <UP>\n12: tvh12: <UP>\n";
+        assert_eq!(host_veths(list).collect::<Vec<_>>(), ["tvh0", "tvh12"]);
     }
 
     #[test]
@@ -822,6 +900,20 @@ mod tests {
             rec.log.lock().unwrap()[0],
             "sysctl -qw net.ipv4.ip_forward=1"
         );
+    }
+
+    #[test]
+    fn vm_traffic_is_let_past_docker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rec = Recorder {
+            fail_on: Some("iptables -C".into()),
+            ..Default::default()
+        };
+        let n = net(&rec, tmp.path());
+        n.init_host().unwrap();
+        let log = rec.log.lock().unwrap();
+        assert!(log.contains(&"iptables -I DOCKER-USER -i tvh+ -j ACCEPT".to_string()));
+        assert!(log.contains(&"iptables -I DOCKER-USER -o tvh+ -j ACCEPT".to_string()));
     }
 
     #[test]

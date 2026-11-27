@@ -87,6 +87,7 @@ type pendingJob struct {
 	secretRef      string
 	submittedAt    time.Time
 	attempts       int
+	robbed         bool // another job took its runner
 }
 
 var (
@@ -170,8 +171,9 @@ func (a *Adapter) serveWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-GitHub-Event")
 	if err := a.handleEvent(r.Context(), event, body); err != nil {
 		a.log().Warn("webhook failed", "event", event, "delivery", r.Header.Get("X-GitHub-Delivery"), "err", err)
-		// 5xx makes GitHub keep the delivery for redelivery; the reconcile
-		// loop also covers jobs we never saw succeed.
+		// 5xx marks the delivery failed in the App's log. GitHub does not
+		// redeliver it on its own, so retriable failures must stay pending
+		// for Reconcile instead of returning here.
 		http.Error(w, "processing failed", http.StatusInternalServerError)
 		return
 	}
@@ -312,6 +314,14 @@ func (a *Adapter) onWorkflowJob(ctx context.Context, e workflowJobEvent) error {
 		a.mu.Lock()
 		delete(a.pending, j.ID)
 		a.active[j.RunnerName] = true
+		// GitHub gives a job to any idle runner whose labels match, so this
+		// may be another pending job's runner. That job has lost it:
+		// re-dispatch it on the next reconcile, and leave the runner alone.
+		for _, y := range a.pending {
+			if y.runnerName == j.RunnerName && y.dispatched && !y.busy {
+				y.runnerID, y.submittedAt, y.robbed = 0, time.Time{}, true
+			}
+		}
 		a.mu.Unlock()
 		a.forgetPending(ctx, j.ID)
 		a.saveActive(ctx, j.RunnerName, e.Installation.ID, e.Repository.FullName)
@@ -378,10 +388,12 @@ func (a *Adapter) onQueued(ctx context.Context, e workflowJobEvent) error {
 	}
 	switch {
 	case err == nil:
-	case IsThrottled(err):
+	case IsThrottled(err) || IsTransient(err):
 		// The job stays pending; Reconcile dispatches it once the
-		// installation's budget recovers.
-		a.log().Warn("GitHub API throttled; job left for reconcile", "repo", p.repo, "job", j.ID, "err", err)
+		// installation's budget recovers or GitHub answers again. GitHub
+		// does not redeliver failed webhooks, so dropping it would leave
+		// the job queued forever.
+		a.log().Warn("GitHub API unavailable; job left for reconcile", "repo", p.repo, "job", j.ID, "throttled", IsThrottled(err), "err", err)
 		err = nil
 	default:
 		a.mu.Lock()
@@ -477,7 +489,30 @@ func (a *Adapter) prepare(ctx context.Context, p *pendingJob) error {
 // throttled attempt does not count towards MaxAttempts.
 func (a *Adapter) dispatch(ctx context.Context, p *pendingJob) error {
 	attempt := p.attempts + 1
-	name := fmt.Sprintf("tachyon-%s-%d", p.sub.Spec.JobID, attempt)
+	base := specJobID(p.id)
+	name := fmt.Sprintf("tachyon-%s-%d", base, attempt)
+	if p.robbed {
+		// The core ignores a job ID it has placed, and the robbed VM is
+		// still running the other job, so the retry needs a new ID. Its
+		// result maps back to this GitHub job even if the robbed VM's
+		// result already removed the original mapping.
+		p.robbed = false
+		p.sub.Spec.JobID = fmt.Sprintf("%s-%d", base, attempt)
+		a.mu.Lock()
+		a.initLocked()
+		ref := a.jobs[base]
+		if ref == nil {
+			ref = &jobRef{
+				installationID: p.installationID,
+				repo:           p.repo,
+				githubJobID:    p.id,
+				runAttempt:     p.event.WorkflowJob.RunAttempt,
+			}
+		}
+		ref.seen = a.now()
+		a.jobs[p.sub.Spec.JobID] = ref
+		a.mu.Unlock()
+	}
 	var jit JITRunner
 	err := a.call(p.installationID, func() (err error) {
 		jit, err = a.API.CreateJITConfig(ctx, p.installationID, p.repo, name, p.labels)
