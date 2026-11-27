@@ -43,7 +43,7 @@ runs:
           cd "$GITHUB_WORKSPACE"
           if git cat-file -e "$base^{commit}" 2>/dev/null || git fetch -q --depth=1 origin "$base" 2>/dev/null; then
             git ls-files -z | xargs -0 -r touch -h -d @1
-            git diff --name-only -z "$base" HEAD | xargs -0 -r touch -h
+            git diff --name-only --diff-filter=d -z "$base" HEAD | xargs -0 -r touch -h -c
             echo "Tachyon warm: file times reset against prebuild ${base:0:7}"
           else
             echo "::warning::prebuild commit $base not fetchable; file times left as checked out"
