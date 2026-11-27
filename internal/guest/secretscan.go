@@ -105,6 +105,9 @@ func ScanSecrets(dir string, literals [][]byte) ([]Finding, error) {
 	}
 	var files []string
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // removed while walking, e.g. a pid file
+		}
 		if err != nil {
 			return err
 		}
@@ -179,6 +182,9 @@ func containsAny(b []byte, needles [][]byte) bool {
 
 func scanFile(p string, literals [][]byte, rules bool) ([]string, error) {
 	f, err := os.Open(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil // removed since the walk: not in the layer
+	}
 	if err != nil {
 		return nil, err
 	}

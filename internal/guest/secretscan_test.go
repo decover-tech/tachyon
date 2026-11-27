@@ -143,3 +143,10 @@ func TestScanSecretsIgnoresSamplesAndBareHeaders(t *testing.T) {
 		t.Fatalf("findings = %v, want only the real keys", got)
 	}
 }
+
+func TestScanFileRemovedSinceWalk(t *testing.T) {
+	hits, err := scanFile(filepath.Join(t.TempDir(), "docker.pid"), nil, true)
+	if err != nil || hits != nil {
+		t.Fatalf("scanFile(missing) = %v, %v; want nil, nil", hits, err)
+	}
+}
