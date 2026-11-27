@@ -12,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -405,9 +406,62 @@ func (a *Agent) writeFiles(files map[string]string) error {
 // paths (cargo fingerprints) stay valid in jobs. Anything outside the
 // runner's home falls back to Layout.Workspace.
 func (a *Agent) workspace(env map[string]string) string {
-	ws := env["TACHYON_WORKSPACE"]
-	if ws != "" && path.Clean(ws) == ws && strings.HasPrefix(ws, a.Layout.Home+"/") {
+	if ws := env["TACHYON_WORKSPACE"]; a.validWorkspace(ws) {
 		return ws
+	}
+	return a.Layout.Workspace
+}
+
+func (a *Agent) validWorkspace(ws string) bool {
+	return ws != "" && path.Clean(ws) == ws && strings.HasPrefix(ws, a.Layout.Home+"/")
+}
+
+// warmRecordPath, in the runner's home, says where and from which commit a
+// prebuild's warm steps built its outputs. Refreshes only fetch a newer
+// commit, so they keep it; tachyon/warm reads the commit.
+const warmRecordPath = ".tachyon/prebuild"
+
+var commitRe = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+
+type warmRecord struct{ Workspace, Commit string }
+
+func (a *Agent) readWarmRecord() warmRecord {
+	var r warmRecord
+	b, err := os.ReadFile(a.host(path.Join(a.Layout.Home, warmRecordPath)))
+	if err != nil {
+		return r
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, _ := strings.Cut(line, "=")
+		switch {
+		case k == "workspace" && a.validWorkspace(v):
+			r.Workspace = v
+		case k == "commit" && commitRe.MatchString(v):
+			r.Commit = v
+		}
+	}
+	return r
+}
+
+func (a *Agent) writeWarmRecord(ws, commit string) error {
+	if !commitRe.MatchString(commit) {
+		commit = ""
+	}
+	p := path.Join(a.Layout.Home, warmRecordPath)
+	if err := a.mkdirAll(path.Dir(p), true); err != nil {
+		return err
+	}
+	if err := os.WriteFile(a.host(p), []byte("workspace="+ws+"\ncommit="+commit+"\n"), 0o644); err != nil {
+		return err
+	}
+	return a.Sys.Chown(a.host(p), a.Layout.UID, a.Layout.GID)
+}
+
+// warmWorkspace is where the prebuild a job forked keeps its outputs.
+// Prebuilds from before the record existed kept them in Layout.Workspace.
+func (a *Agent) warmWorkspace() string {
+	if r := a.readWarmRecord(); r.Workspace != "" {
+		return r.Workspace
 	}
 	return a.Layout.Workspace
 }
@@ -443,13 +497,14 @@ func (a *Agent) stashWarmPaths(env map[string]string) error {
 	if env["TACHYON_PREBUILD_MATCH"] != "full" || env["TACHYON_WARM_PATHS"] == "" {
 		return nil
 	}
+	base := a.warmWorkspace()
 	for _, p := range strings.Split(env["TACHYON_WARM_PATHS"], ":") {
 		if p == "" || path.IsAbs(p) || strings.Contains(p, "..") {
 			a.log().Warn("skipping unsafe warm path", "path", p)
 			continue
 		}
 		p = path.Clean(p)
-		src := path.Join(a.workspace(env), p)
+		src := path.Join(base, p)
 		if _, err := os.Lstat(a.host(src)); err != nil {
 			a.log().Warn("warm path not in prebuild", "path", p)
 			continue
@@ -521,6 +576,10 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 	pb := p.Prebuild
 	l := a.Layout
 	ws := a.workspace(p.Env)
+	if pb.Refresh {
+		// Fetch the new commit where the forked prebuild's outputs are.
+		ws = a.warmWorkspace()
+	}
 	if err := a.mkdirAll(ws, true); err != nil {
 		return 0, err
 	}
@@ -578,6 +637,11 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 			res.Failure = stepFailure("warm", i+1, exit, last.Bytes(), cloneToken)
 			code = exit
 			break
+		}
+	}
+	if code == 0 && len(pb.WarmCommands) > 0 {
+		if err := a.writeWarmRecord(ws, p.Env["TACHYON_PREBUILD_COMMIT"]); err != nil {
+			return 0, fmt.Errorf("warm record: %w", err)
 		}
 	}
 	for _, kp := range pb.KeepPaths {

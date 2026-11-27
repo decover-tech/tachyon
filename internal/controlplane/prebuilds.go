@@ -76,6 +76,7 @@ func (c *Core) BuildPrebuild(ctx context.Context, req prebuild.BuildRequest) err
 	env["TACHYON_JOB_ID"] = req.JobID
 	env["TACHYON_PREBUILD_KEY"] = req.Key
 	env["TACHYON_WORKSPACE"] = runnerWorkspace(shortRepo(req.Repo))
+	env["TACHYON_PREBUILD_COMMIT"] = req.Commit
 	msg := &hostlinkv1.AssignJob{
 		JobId:              req.JobID,
 		Tenant:             req.Tenant,

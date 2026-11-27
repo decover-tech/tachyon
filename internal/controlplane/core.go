@@ -440,12 +440,8 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 	env := mir.Env()
 	env["TACHYON_JOB_ID"] = spec.JobID
 	env["TACHYON_PREBUILD_MATCH"] = string(fork.Match)
-	env["TACHYON_WORKSPACE"] = runnerWorkspace(repo)
 	if cfg != nil && fork.Snapshot != nil {
 		env["TACHYON_WARM_PATHS"] = strings.Join(cfg.WorkspacePaths(), ":")
-		if fork.Snapshot.Commit != "" {
-			env["TACHYON_PREBUILD_COMMIT"] = fork.Snapshot.Commit
-		}
 	}
 	cacheEnv, err := cache.GuestEnv(c.CacheURL, c.CacheSigner, spec)
 	if err != nil {

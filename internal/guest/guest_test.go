@@ -882,3 +882,70 @@ func TestPrebuildRunsInRunnerWorkspace(t *testing.T) {
 		}
 	}
 }
+
+const warmCommit = "0123456789abcdef0123456789abcdef01234567"
+
+func TestPrebuildRecordsWarmBuild(t *testing.T) {
+	e := newTestEnv(t)
+	ws := "/home/runner/actions-runner/_work/kosha/kosha"
+	p := prebuildPayload()
+	p.Env["TACHYON_WORKSPACE"] = ws
+	p.Env["TACHYON_PREBUILD_COMMIT"] = warmCommit
+	if res := e.agent.Run(context.Background(), p); res.ExitCode != 0 {
+		t.Fatalf("exit code %d\n%s", res.ExitCode, e.logs)
+	}
+	if r := e.agent.readWarmRecord(); r.Workspace != ws || r.Commit != warmCommit {
+		t.Errorf("warm record = %+v", r)
+	}
+}
+
+func TestRefreshKeepsWarmRecord(t *testing.T) {
+	for _, recorded := range []string{"/home/runner/actions-runner/_work/kosha/kosha", ""} {
+		e := newTestEnv(t)
+		old := "workspace=" + recorded + "\ncommit=" + warmCommit + "\n"
+		if recorded != "" {
+			e.touch(t, e.root("/home/runner/.tachyon/prebuild"), old)
+		}
+		p := prebuildPayload()
+		p.Env["TACHYON_WORKSPACE"] = "/home/runner/actions-runner/_work/new/new"
+		p.Env["TACHYON_PREBUILD_COMMIT"] = strings.Repeat("f", 40)
+		p.Prebuild.Refresh = true
+		p.Prebuild.WarmCommands = nil
+		p.Prebuild.CloneCommands = []string{"git fetch"}
+		p.Prebuild.CloneTokenB64 = base64.StdEncoding.EncodeToString([]byte("tok"))
+		if res := e.agent.Run(context.Background(), p); res.ExitCode != 0 {
+			t.Fatalf("exit code %d\n%s", res.ExitCode, e.logs)
+		}
+		want := recorded
+		if want == "" {
+			want = e.agent.Layout.Workspace
+		}
+		for _, c := range e.sys.runs {
+			if c.Dir != want {
+				t.Errorf("recorded %q: refresh ran in %s, want %s", recorded, c.Dir, want)
+			}
+		}
+		b, _ := os.ReadFile(e.root("/home/runner/.tachyon/prebuild"))
+		if recorded != "" && string(b) != old {
+			t.Errorf("refresh rewrote the warm record: %q", b)
+		}
+		if recorded == "" && len(b) != 0 {
+			t.Errorf("refresh wrote a warm record: %q", b)
+		}
+	}
+}
+
+func TestStashFromRecordedWorkspace(t *testing.T) {
+	e := newTestEnv(t)
+	l := e.agent.Layout
+	ws := "/home/runner/actions-runner/_work/kosha/kosha"
+	e.touch(t, e.root("/home/runner/.tachyon/prebuild"), "workspace="+ws+"\ncommit="+warmCommit+"\n")
+	e.touch(t, e.root(ws+"/node_modules/a"), "x")
+	e.sys.run = runnerOutput(successLines, 0)
+	if res := e.agent.Run(context.Background(), jobPayload()); res.ExitCode != 0 {
+		t.Fatalf("exit code %d\n%s", res.ExitCode, e.logs)
+	}
+	if _, err := os.Stat(e.root(l.WarmStash + "/node_modules/a")); err != nil {
+		t.Errorf("node_modules not stashed from %s: %v", ws, err)
+	}
+}

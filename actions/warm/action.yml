@@ -37,8 +37,8 @@ runs:
         # Tools that compare file times with their outputs (cargo, make) would
         # rebuild everything, since checkout gives every file a new mtime.
         # Age the tracked files, then touch only what changed since the
-        # prebuild's commit.
-        base="${TACHYON_PREBUILD_COMMIT:-}"
+        # commit the prebuild's outputs were built from (refreshes keep it).
+        base=$(sed -n 's/^commit=//p' "$HOME/.tachyon/prebuild" 2>/dev/null || true)
         if [[ $result == hit && -n "$base" ]] && git -C "$GITHUB_WORKSPACE" rev-parse -q --verify HEAD >/dev/null; then
           cd "$GITHUB_WORKSPACE"
           if git cat-file -e "$base^{commit}" 2>/dev/null || git fetch -q --depth=1 origin "$base" 2>/dev/null; then
