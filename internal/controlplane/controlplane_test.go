@@ -204,6 +204,12 @@ func TestSubmitForksPrebuildOnHost(t *testing.T) {
 	if envs["TACHYON_PREBUILD_MATCH"] != "full" || envs["TACHYON_WARM_PATHS"] != "node_modules" || envs["TACHYON_JOB_ID"] != "j1" {
 		t.Errorf("guest env = %v", envs)
 	}
+	if envs["TACHYON_WORKSPACE"] != "/home/runner/actions-runner/_work/api/api" {
+		t.Errorf("TACHYON_WORKSPACE = %q", envs["TACHYON_WORKSPACE"])
+	}
+	if c, ok := envs["TACHYON_PREBUILD_COMMIT"]; ok {
+		t.Errorf("TACHYON_PREBUILD_COMMIT = %q for a prebuild with no commit", c)
+	}
 	if len(a.GetVolumes()) != 1 || a.GetVolumes()[0].GetMount() != "/var/lib/docker" {
 		t.Errorf("volumes = %v", a.GetVolumes())
 	}
@@ -265,7 +271,11 @@ func TestSubmitSameCommitPrebuildNeedsItsCopyOnHost(t *testing.T) {
 		if err := e.core.Submit(context.Background(), e.submission(t, "j1", 2)); err != nil {
 			t.Fatal(err)
 		}
-		if a := s.next(t).GetAssign(); a.GetPrebuildMatch() != tt.want {
+		a := s.next(t).GetAssign()
+		if got := a.GetGuest().GetEnv()["TACHYON_PREBUILD_COMMIT"]; got != "abc" {
+			t.Errorf("host key %s: TACHYON_PREBUILD_COMMIT = %q, want abc", tt.hostKey, got)
+		}
+		if a.GetPrebuildMatch() != tt.want {
 			t.Errorf("host key %s: match = %q, want %q", tt.hostKey, a.GetPrebuildMatch(), tt.want)
 		}
 	}

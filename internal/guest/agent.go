@@ -400,6 +400,18 @@ func (a *Agent) writeFiles(files map[string]string) error {
 	return nil
 }
 
+// workspace is where the prebuild's warm steps run: $TACHYON_WORKSPACE, the
+// runner's checkout path for the repo, so build outputs that record absolute
+// paths (cargo fingerprints) stay valid in jobs. Anything outside the
+// runner's home falls back to Layout.Workspace.
+func (a *Agent) workspace(env map[string]string) string {
+	ws := env["TACHYON_WORKSPACE"]
+	if ws != "" && path.Clean(ws) == ws && strings.HasPrefix(ws, a.Layout.Home+"/") {
+		return ws
+	}
+	return a.Layout.Workspace
+}
+
 // env is the environment for the runner and warm steps. It never includes
 // the runner config.
 func (a *Agent) env(extra map[string]string) []string {
@@ -437,7 +449,7 @@ func (a *Agent) stashWarmPaths(env map[string]string) error {
 			continue
 		}
 		p = path.Clean(p)
-		src := path.Join(a.Layout.Workspace, p)
+		src := path.Join(a.workspace(env), p)
 		if _, err := os.Lstat(a.host(src)); err != nil {
 			a.log().Warn("warm path not in prebuild", "path", p)
 			continue
@@ -508,7 +520,8 @@ func (a *Agent) runRunner(ctx context.Context, p *Payload, env []string, res *Re
 func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Result) (int, error) {
 	pb := p.Prebuild
 	l := a.Layout
-	if err := a.mkdirAll(l.Workspace, true); err != nil {
+	ws := a.workspace(p.Env)
+	if err := a.mkdirAll(ws, true); err != nil {
 		return 0, err
 	}
 	code := 0
@@ -520,7 +533,7 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 			Path:   l.Shell,
 			Args:   []string{"-euo", "pipefail", "-c", c},
 			Env:    stepEnv,
-			Dir:    l.Workspace,
+			Dir:    ws,
 			Root:   l.Root,
 			UID:    l.UID,
 			GID:    l.GID,
@@ -571,7 +584,7 @@ func (a *Agent) prebuild(ctx context.Context, p *Payload, env []string, res *Res
 		gp, err := a.guestPath(kp, false)
 		if err != nil {
 			// Relative keep paths are inside the workspace.
-			gp = path.Join(l.Workspace, path.Clean(kp))
+			gp = path.Join(ws, path.Clean(kp))
 		}
 		if _, err := os.Lstat(a.host(gp)); err != nil {
 			a.log().Warn("prebuild path missing after warm steps", "path", kp)

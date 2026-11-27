@@ -858,3 +858,27 @@ func TestRunJobStartsDockerInRoot(t *testing.T) {
 		t.Errorf("dockerd args = %q, want %q (socket group the runner has)", dockerd.Args, want)
 	}
 }
+
+func TestPrebuildRunsInRunnerWorkspace(t *testing.T) {
+	for ws, want := range map[string]string{
+		"/home/runner/actions-runner/_work/kosha/kosha": "/home/runner/actions-runner/_work/kosha/kosha",
+		"/etc/kosha":              "",
+		"/home/runner/../etc":     "",
+		"/home/runnerx/_work/a/a": "",
+	} {
+		e := newTestEnv(t)
+		if want == "" {
+			want = e.agent.Layout.Workspace
+		}
+		p := prebuildPayload()
+		p.Env["TACHYON_WORKSPACE"] = ws
+		if res := e.agent.Run(context.Background(), p); res.ExitCode != 0 {
+			t.Fatalf("%s: exit code %d\n%s", ws, res.ExitCode, e.logs)
+		}
+		for _, c := range e.sys.runs {
+			if c.Dir != want {
+				t.Errorf("TACHYON_WORKSPACE=%s: warm step ran in %s, want %s", ws, c.Dir, want)
+			}
+		}
+	}
+}

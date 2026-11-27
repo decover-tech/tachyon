@@ -34,6 +34,21 @@ runs:
             fi
           done
         fi
+        # Tools that compare file times with their outputs (cargo, make) would
+        # rebuild everything, since checkout gives every file a new mtime.
+        # Age the tracked files, then touch only what changed since the
+        # prebuild's commit.
+        base="${TACHYON_PREBUILD_COMMIT:-}"
+        if [[ $result == hit && -n "$base" ]] && git -C "$GITHUB_WORKSPACE" rev-parse -q --verify HEAD >/dev/null; then
+          cd "$GITHUB_WORKSPACE"
+          if git cat-file -e "$base^{commit}" 2>/dev/null || git fetch -q --depth=1 origin "$base" 2>/dev/null; then
+            git ls-files -z | xargs -0 -r touch -h -d @1
+            git diff --name-only -z "$base" HEAD | xargs -0 -r touch -h
+            echo "Tachyon warm: file times reset against prebuild ${base:0:7}"
+          else
+            echo "::warning::prebuild commit $base not fetchable; file times left as checked out"
+          fi
+        fi
         echo "TACHYON_WARM=$result" >> "$GITHUB_ENV"
         echo "warm=$result" >> "$GITHUB_OUTPUT"
         echo "Tachyon warm: $result (prebuild match: ${TACHYON_PREBUILD_MATCH:-n/a})"

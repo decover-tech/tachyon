@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -439,8 +440,12 @@ func (c *Core) buildAssign(ctx context.Context, sub jobapi.Submission, a schedul
 	env := mir.Env()
 	env["TACHYON_JOB_ID"] = spec.JobID
 	env["TACHYON_PREBUILD_MATCH"] = string(fork.Match)
+	env["TACHYON_WORKSPACE"] = runnerWorkspace(repo)
 	if cfg != nil && fork.Snapshot != nil {
 		env["TACHYON_WARM_PATHS"] = strings.Join(cfg.WorkspacePaths(), ":")
+		if fork.Snapshot.Commit != "" {
+			env["TACHYON_PREBUILD_COMMIT"] = fork.Snapshot.Commit
+		}
 	}
 	cacheEnv, err := cache.GuestEnv(c.CacheURL, c.CacheSigner, spec)
 	if err != nil {
@@ -519,6 +524,13 @@ func trustToProto(t jobapi.Trust) hostlinkv1.Trust {
 }
 
 // shortRepo strips the host: github.com/acme/api -> acme/api.
+// runnerWorkspace is where the GitHub runner in the image checks out repo
+// (owner/name): its work folder, then name/name.
+func runnerWorkspace(repo string) string {
+	name := path.Base(repo)
+	return "/home/runner/actions-runner/_work/" + name + "/" + name
+}
+
 func shortRepo(repo string) string {
 	if i := strings.Index(repo, "/"); i >= 0 && strings.Contains(repo[:i], ".") {
 		return repo[i+1:]
